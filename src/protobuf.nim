@@ -130,9 +130,11 @@
 ## Notice again how you can write it in different styles in Nim if you'd like.
 ## One could of course also create an alias for this name should it prove too
 ## verbose. Analagously to the ``write`` procedure the reader also takes an
-## optional ``maxSize`` argument of the maximum size to read for the message
-## before returning. If the size is set to 0 the stream would be read until
-## ``atEnd`` returns true. The ``len`` procedure is slightly simpler, it only
+## optional ``maxSize`` argument of the exact size of the message on the wire.
+## If the size is negative, the default, the stream is read until ``atEnd``
+## returns true, while a size of 0 is an empty message. If the stream ends
+## before ``maxSize`` bytes are read an ``IOError`` is raised.
+## The ``len`` procedure is slightly simpler, it only
 ## takes an instance of the message type and returns the size this message would
 ## take on the wire, in bytes. This is used internally, but might have some
 ## other applications elsewhere as well. Notice that this size might vary from
@@ -719,6 +721,11 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
         newEmptyNode()
       )
       var messageBlock = nnkRecList.newNimNode()
+      messageBlock.add(nnkIdentDefs.newTree(
+        newIdentNode("protoUnknownFields"),
+        newIdentNode("string"),
+        newEmptyNode()
+      ))
       if node.fields.len > 0:
         messageBlock.add(nnkIdentDefs.newTree(
           newIdentNode("fields"),
@@ -801,7 +808,7 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
       of 1:
         if node.repeated:
           result.add(quote do:
-            `res` += 8*`field`.len
+            `res` += getVarIntLen((8*`field`.len).int64) + 8*`field`.len
           )
         else:
           result.add(quote do:
@@ -810,7 +817,7 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
       of 5:
         if node.repeated:
           result.add(quote do:
-            `res` += 4*`field`.len
+            `res` += getVarIntLen((4*`field`.len).int64) + 4*`field`.len
           )
         else:
           result.add(quote do:
@@ -833,13 +840,18 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
         let
           iVar = nskForVar.genSym()
           varInt = if node.repeated: nnkBracketExpr.newTree(field, iVar) else: field
-          getVarIntLen = newIdentNode("getVarIntLen")
-          innerBody = quote do:
-            `res` += `getVarIntLen`(`varInt`)
+          # sint fields are ZigZag encoded, their length must be taken from
+          # the encoded value
+          lenProc = newIdentNode(if node.protoType in ["sint32", "sint64"]: "getSVarIntLen" else: "getVarIntLen")
+          packedSize = genSym(nskVar)
           outerBody = if node.repeated: (quote do:
+            var `packedSize` = 0
             for `iVar` in 0..`field`.high:
-              `innerBody`
-          ) else: innerBody
+              `packedSize` += `lenProc`(`varInt`)
+            `res` += getVarIntLen(`packedSize`.int64) + `packedSize`
+          ) else: (quote do:
+            `res` += `lenProc`(`varInt`)
+          )
         result.add(outerBody)
       else:
         echo "Unable to create code"
@@ -866,34 +878,57 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
     if typeMapping.hasKey(protoType):
       quote do: `stream`.`protoRead`()
     else:
+      # Messages are always length-delimited on the wire
       quote do:
-        when compiles(`stream`.`protoRead`(`stream`.protoReadInt64())):
-          `stream`.`protoRead`(`stream`.protoReadInt64())
-        else:
-          `stream`.`protoRead`()
+        `stream`.`protoRead`(`stream`.protoReadInt64())
 
   proc generateFieldRead(typeMapping: Table[string, tuple[kind, write, read: NimNode, wire: int]], node: ProtoNode, stream, field: NimNode, parent: NimNode): NimNode =
+    # References to `fieldSpec` bind to the tag read by the surrounding
+    # message reader, it is deliberately not hygienic.
     result = newStmtList()
+    let fieldSpec = newIdentNode("fieldSpec")
     if node.map:
       let
         keyType = if typeMapping.hasKey(node.keyType): typeMapping[node.keyType].kind else: newIdentNode(node.keyType.replace(".", "_"))
         valueType = if typeMapping.hasKey(node.protoType): typeMapping[node.protoType].kind else: newIdentNode(node.protoType.replace(".", "_"))
+        keyWire = newLit(typeMapping[node.keyType].wire.uint64)
+        valueWire = newLit(if typeMapping.hasKey(node.protoType): typeMapping[node.protoType].wire.uint64 else: 2'u64)
         keySym = genSym(nskVar)
         valueSym = genSym(nskVar)
         keyRead = generateReadStmt(typeMapping, node.keyType, stream)
         valueRead = generateReadStmt(typeMapping, node.protoType, stream)
+        readIntoValue = newIdentNode("readInto" & node.protoType.replace(".", "_"))
+        # A message value that appears again within an entry is merged
+        valueMerge = if typeMapping.hasKey(node.protoType):
+            quote do:
+              `valueSym` = `valueRead`
+          else:
+            quote do:
+              if `valueSym`.isNil:
+                `valueSym` = `valueRead`
+              else:
+                `stream`.`readIntoValue`(`valueSym`, `stream`.protoReadInt64())
       result.add(quote do:
-        let endPos = `stream`.getPosition() + `stream`.protoReadInt64()
+        if (`fieldSpec` and 0b111'u64) != 2'u64:
+          raise newException(ValueError, "Wrong wire type for map field")
+        let
+          entryLen = `stream`.protoReadInt64()
+          endPos = `stream`.getPosition() + entryLen
         var `keySym`: `keyType`
         var `valueSym`: `valueType`
         while `stream`.getPosition() < endPos:
-          case (`stream`.protoReadInt64().uint64 shr 3).int64:
+          let entrySpec = `stream`.protoReadTag()
+          case (entrySpec shr 3).int64:
           of 1:
+            if (entrySpec and 0b111'u64) != `keyWire`:
+              raise newException(ValueError, "Wrong wire type for map key")
             `keySym` = `keyRead`
           of 2:
-            `valueSym` = `valueRead`
+            if (entrySpec and 0b111'u64) != `valueWire`:
+              raise newException(ValueError, "Wrong wire type for map value")
+            `valueMerge`
           else:
-            discard
+            `stream`.protoSkipField(entrySpec)
         when `valueSym` is ref:
           # An entry may omit its value; default-initialise it like protoc does
           if `valueSym`.isNil:
@@ -904,29 +939,57 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
       )
     elif node.repeated:
       if typeMapping.hasKey(node.protoType) and node.protoType != "string" and node.protoType != "bytes":
+        # Repeated scalars must accept both the packed and the unpacked encoding
         let
-          sizeSym = genSym(nskVar)
           protoRead = typeMapping[node.protoType].read
+          scalarWire = newLit(typeMapping[node.protoType].wire.uint64)
         result.add(quote do:
-          var `sizeSym` = `stream`.protoReadInt64()
-          `parent`.`field` = @[]
-          let endPos = `stream`.getPosition() + `sizeSym`
-          while `stream`.getPosition() < endPos:
+          if not `parent`.has(`field`):
+            `parent`.`field` = @[]
+          if (`fieldSpec` and 0b111'u64) == 2'u64:
+            let
+              packedLen = `stream`.protoReadInt64()
+              endPos = `stream`.getPosition() + packedLen
+            while `stream`.getPosition() < endPos:
+              `parent`.`field`.add(`stream`.`protoRead`())
+          elif (`fieldSpec` and 0b111'u64) == `scalarWire`:
             `parent`.`field`.add(`stream`.`protoRead`())
+          else:
+            raise newException(ValueError, "Wrong wire type for repeated field")
         )
       else:
-        let
-          protoRead = if typeMapping.hasKey(node.protoType): typeMapping[node.protoType].read else: newIdentNode("read" & node.protoType.replace(".", "_"))
-          readStmt = if typeMapping.hasKey(node.protoType): quote do: `stream`.`protoRead`()
-            else: quote do: `stream`.`protoRead`(`stream`.protoReadInt64()) #TODO: This is not implemented on the writer level
+        let readStmt = generateReadStmt(typeMapping, node.protoType, stream)
         result.add(quote do:
+          if (`fieldSpec` and 0b111'u64) != 2'u64:
+            raise newException(ValueError, "Wrong wire type for field")
           if not `parent`.has(`field`):
             `parent`.`field` = @[]
           `parent`.`field`.add(`readStmt`)
         )
     else:
-      let readStmt = generateReadStmt(typeMapping, node.protoType, stream)
-      result.add(nnkAsgn.newTree(nnkDotExpr.newTree(parent, field), readStmt))
+      if typeMapping.hasKey(node.protoType):
+        let
+          expectedWire = newLit(typeMapping[node.protoType].wire.uint64)
+          readStmt = generateReadStmt(typeMapping, node.protoType, stream)
+          target = nnkAsgn.newTree(nnkDotExpr.newTree(parent, field), readStmt)
+        result.add(quote do:
+          if (`fieldSpec` and 0b111'u64) != `expectedWire`:
+            raise newException(ValueError, "Wrong wire type for field")
+          `target`
+        )
+      else:
+        # A message field that appears again is merged with the previous value
+        let
+          readIntoMsg = newIdentNode("readInto" & node.protoType.replace(".", "_"))
+          readMsg = newIdentNode("read" & node.protoType.replace(".", "_"))
+        result.add(quote do:
+          if (`fieldSpec` and 0b111'u64) != 2'u64:
+            raise newException(ValueError, "Wrong wire type for field")
+          if `parent`.has(`field`):
+            `stream`.`readIntoMsg`(`parent`.`field`, `stream`.protoReadInt64())
+          else:
+            `parent`.`field` = `stream`.`readMsg`(`stream`.protoReadInt64())
+        )
 
   proc generateFieldWrite(typeMapping: Table[string, tuple[kind, write, read: NimNode, wire: int]], node: ProtoNode, stream, field: NimNode): NimNode =
     # Write field number and wire type
@@ -983,11 +1046,13 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
             `stream`.protoWriteInt64(bytes)
           )
         of 0:
-          # Sum varint lengths and write them
+          # Sum varint lengths and write them, using the ZigZag encoded
+          # length for sint fields
+          let getVarIntLen = newIdentNode(if node.protoType in ["sint32", "sint64"]: "getSVarIntLen" else: "getVarIntLen")
           result.add(quote do:
             var bytes = 0
             for i in 0..`field`.high:
-              bytes += getVarIntLen(`field`[i])
+              bytes += `getVarIntLen`(`field`[i])
             `stream`.protoWriteInt64(bytes)
           )
         else:
@@ -1015,12 +1080,10 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
             `fieldWrite`
             `stream`.`protoWrite`(`varInt`)
         else:
+          # Messages are always written with their length prefixed
           quote do:
             `fieldWrite`
-            when compiles(`stream`.write(`varInt`, true)):
-              `stream`.write(`varInt`, true)
-            else:
-              `stream`.write(`varInt`)
+            `stream`.write(`varInt`, true)
         outerBody = if node.repeated: (quote do:
           for `iVar` in 0..`field`.high:
             `innerBody`
@@ -1032,35 +1095,54 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
       of Message:
         let
           readName = newIdentNode("read" & node.messageName.replace(".", "_"))
+          readIntoName = newIdentNode("readInto" & node.messageName.replace(".", "_"))
           messageType = newIdentNode(node.messageName.replace(".", "_"))
           res = newIdentNode("result")
           s = newIdentNode("s")
           o = newIdentNode("o")
           maxSize = newIdentNode("maxSize")
           writeSize = newIdentNode("writeSize")
+          fieldSpec = newIdentNode("fieldSpec")
+        # readInto merges from the stream into an existing message, which is
+        # both the reading backend and protobuf's message merge semantics. A
+        # negative maxSize reads until the end of the stream, 0 is an empty
+        # message.
         var procDecls = quote do:
-          proc `readName`(`s`: Stream, `maxSize`: int64 = 0): `messageType`
+          proc `readIntoName`(`s`: Stream, `o`: `messageType`, `maxSize`: int64 = -1)
+          proc `readName`(`s`: Stream, `maxSize`: int64 = -1): `messageType`
           proc write(`s`: Stream, `o`: `messageType`, `writeSize` = false)
           proc len(`o`: `messageType`): int
         var procImpls = quote do:
-          proc `readName`(`s`: Stream, `maxSize`: int64 = 0): `messageType` =
-            `res` = new `messageType`
+          proc `readIntoName`(`s`: Stream, `o`: `messageType`, `maxSize`: int64 = -1) =
             let startPos = `s`.getPosition()
-            while not `s`.atEnd and (`maxSize` == 0 or `s`.getPosition() < startPos + `maxSize`):
+            while not `s`.atEnd and (`maxSize` < 0 or `s`.getPosition() < startPos + `maxSize`):
               let
-                fieldSpec = `s`.protoReadInt64().uint64
-                # wireType = fieldSpec and 0b111
-                fieldNumber = fieldSpec shr 3
+                `fieldSpec` = `s`.protoReadTag()
+                fieldNumber = `fieldSpec` shr 3
               case fieldNumber.int64:
+            if `maxSize` > 0 and `s`.getPosition() != startPos + `maxSize`:
+              raise newException(IOError, "Stream ended before end of message")
+          proc `readName`(`s`: Stream, `maxSize`: int64 = -1): `messageType` =
+            `res` = new `messageType`
+            `s`.`readIntoName`(`res`, `maxSize`)
           proc write(`s`: Stream, `o`: `messageType`, `writeSize` = false) =
             if `writeSize`:
               `s`.protoWriteInt64(`o`.len)
           proc len(`o`: `messageType`): int
-        procImpls[2][6] = newStmtList()
+        procImpls[3][6] = newStmtList()
         for field in node.fields:
           generateProcs(typeMapping, field, procDecls, procImpls)
-        # TODO: Add generic reader for unknown types based on wire type
-        procImpls[0][6][2][1][1].add(nnkElse.newTree(nnkStmtList.newTree(nnkDiscardStmt.newTree(newEmptyNode()))))
+        # Unknown fields are captured on read and emitted again on write
+        procImpls[0][6][1][1][1].add(nnkElse.newTree(nnkStmtList.newTree(
+          newCall(newIdentNode("protoCaptureField"), s, fieldSpec,
+            nnkDotExpr.newTree(o, newIdentNode("protoUnknownFields"))))))
+        procImpls[2][6].add(quote do:
+          if `o`.protoUnknownFields.len > 0:
+            `s`.write(`o`.protoUnknownFields)
+        )
+        procImpls[3][6].add(quote do:
+          `res` += `o`.protoUnknownFields.len
+        )
         for enumType in node.definedEnums:
           generateProcs(typeMapping, enumType, procDecls, procImpls)
         for message in node.nested:
@@ -1071,38 +1153,61 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
         let
           oneofName = newIdentNode(node.oneofname.rsplit({'.'}, 1)[1])
           oneofType = newIdentNode(node.oneofname.replace(".", "_") & "_Oneof")
+          readTarget = newIdentNode("o")
         for i in 0..node.oneof.high:
           let oneof = node.oneof[i]
-          impls[0][6][2][1][1].add(nnkOfBranch.newTree(newLit(oneof.number),
-            nnkStmtList.newTree(
-              nnkAsgn.newTree(nnkDotExpr.newTree(newIdentNode("result"), oneofName),
-                quote do: `oneofType`(option: `i`)
-              ),
-              generateFieldRead(typeMapping, oneof, impls[1][3][1][0], newIdentNode(oneof.name), nnkDotExpr.newTree(newIdentNode("result"), oneofName))
-            )
-          ))
+          if typeMapping.hasKey(oneof.protoType) or oneof.repeated:
+            impls[0][6][1][1][1].add(nnkOfBranch.newTree(newLit(oneof.number),
+              nnkStmtList.newTree(
+                nnkAsgn.newTree(nnkDotExpr.newTree(readTarget, oneofName),
+                  quote do: `oneofType`(option: `i`)
+                ),
+                generateFieldRead(typeMapping, oneof, impls[0][3][1][0], newIdentNode(oneof.name), nnkDotExpr.newTree(readTarget, oneofName))
+              )
+            ))
+          else:
+            # A message member is merged when the same field appears again,
+            # and replaced when the oneof last held a different member
+            let
+              memberName = newIdentNode(oneof.name)
+              readIntoMember = newIdentNode("readInto" & oneof.protoType.replace(".", "_"))
+              readMember = newIdentNode("read" & oneof.protoType.replace(".", "_"))
+              stream = impls[0][3][1][0]
+              fieldSpec = newIdentNode("fieldSpec")
+              iLit = newLit(i)
+            impls[0][6][1][1][1].add(nnkOfBranch.newTree(newLit(oneof.number),
+              nnkStmtList.newTree(quote do:
+                if (`fieldSpec` and 0b111'u64) != 2'u64:
+                  raise newException(ValueError, "Wrong wire type for field")
+                if `readTarget`.has(`oneofName`) and `readTarget`.`oneofName`.option == `iLit`:
+                  `stream`.`readIntoMember`(`readTarget`.`oneofName`.`memberName`, `stream`.protoReadInt64())
+                else:
+                  `readTarget`.`oneofName` = `oneofType`(option: `iLit`)
+                  `readTarget`.`oneofName`.`memberName` = `stream`.`readMember`(`stream`.protoReadInt64())
+              )
+            ))
         var
           oneofWriteBlock = nnkCaseStmt.newTree(
-              nnkDotExpr.newTree(nnkDotExpr.newTree(impls[1][3][2][0], oneofName), newIdentNode("option"))
+              nnkDotExpr.newTree(nnkDotExpr.newTree(impls[2][3][2][0], oneofName), newIdentNode("option"))
             )
           oneofLenBlock = nnkCaseStmt.newTree(
-              nnkDotExpr.newTree(nnkDotExpr.newTree(impls[2][3][1][0], oneofName), newIdentNode("option"))
+              nnkDotExpr.newTree(nnkDotExpr.newTree(impls[3][3][1][0], oneofName), newIdentNode("option"))
             )
 
-        let parent = impls[1][3][2][0]
+        let parent = impls[2][3][2][0]
         for i in 0..node.oneof.high:
           oneofWriteBlock.add(nnkOfBranch.newTree(
               newLit(i),
-              generateFieldWrite(typeMapping, node.oneof[i], impls[1][3][1][0],
+              generateFieldWrite(typeMapping, node.oneof[i], impls[2][3][1][0],
                 nnkDotExpr.newTree(nnkDotExpr.newTree(parent, oneofName), newIdentNode(node.oneof[i].name))
               )
             )
           )
-        impls[1][6].add(quote do:
+        impls[2][6].add(quote do:
           if `parent`.has(`oneofName`):
             `oneofWriteBlock`
         )
-        let lenParent = impls[2][3][1][0]
+        let lenParent = impls[3][3][1][0]
         for i in 0..node.oneof.high:
           oneofLenBlock.add(nnkOfBranch.newTree(
               newLit(i),
@@ -1111,25 +1216,25 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
               )
             )
           )
-        impls[2][6].add(quote do:
+        impls[3][6].add(quote do:
           if `lenParent`.has(`oneofName`):
             `oneofLenBlock`
         )
       of Field:
-        impls[0][6][2][1][1].add(nnkOfBranch.newTree(newLit(node.number),
-          generateFieldRead(typeMapping, node, impls[0][3][1][0], newIdentNode(node.name), newIdentNode("result"))
+        impls[0][6][1][1][1].add(nnkOfBranch.newTree(newLit(node.number),
+          generateFieldRead(typeMapping, node, impls[0][3][1][0], newIdentNode(node.name), newIdentNode("o"))
         ))
         let
           field = newIdentNode(node.name)
-          parent = impls[1][3][2][0]
-          lenParent = impls[2][3][1][0]
-          fieldWrite = generateFieldWrite(typeMapping, node, impls[1][3][1][0], nnkDotExpr.newTree(parent, field))
+          parent = impls[2][3][2][0]
+          lenParent = impls[3][3][1][0]
+          fieldWrite = generateFieldWrite(typeMapping, node, impls[2][3][1][0], nnkDotExpr.newTree(parent, field))
           fieldLen = generateFieldLen(typeMapping, node, nnkDotExpr.newTree(lenParent, field))
-        impls[1][6].add(quote do:
+        impls[2][6].add(quote do:
           if `parent`.has(`field`):
             `fieldWrite`
         )
-        impls[2][6].add(quote do:
+        impls[3][6].add(quote do:
           if `lenParent`.has(`field`):
             `fieldLen`
         )

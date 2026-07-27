@@ -110,4 +110,16 @@ block:
   let read = ss.readMaps()
   assert not read.inners["k"].isNil
 
+# Unknown fields are skipped, both in messages and inside map entries
+block:
+  var ss = newStringStream()
+  ss.write "\x78\x05"                          # field 15, varint
+  ss.write "\x72\x03\x61\x62\x63"              # field 14, length-delimited
+  ss.write "\x6D\xDE\xAD\xBE\xEF"              # field 13, 32-bit
+  ss.write "\x61\x01\x02\x03\x04\x05\x06\x07\x08" # field 12, 64-bit
+  ss.write "\x0A\x07\x0A\x01\x61\x18\x07\x10\x02" # counts entry with unknown field 3
+  ss.setPosition(0)
+  let read = ss.readMaps()
+  assert read.counts == {"a": 2'i32}.toTable
+
 echo "All good!"

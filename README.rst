@@ -132,9 +132,11 @@ message the reader would be named ``read_our_package_ExampleMessage``.
 Notice again how you can write it in different styles in Nim if you'd like.
 One could of course also create an alias for this name should it prove too
 verbose. Analagously to the ``write`` procedure the reader also takes an
-optional ``maxSize`` argument of the maximum size to read for the message
-before returning. If the size is set to 0 the stream would be read until
-``atEnd`` returns true. The ``len`` procedure is slightly simpler, it only
+optional ``maxSize`` argument of the exact size of the message on the wire.
+If the size is negative, the default, the stream is read until ``atEnd``
+returns true, while a size of 0 is an empty message. If the stream ends
+before ``maxSize`` bytes are read an ``IOError`` is raised.
+The ``len`` procedure is slightly simpler, it only
 takes an instance of the message type and returns the size this message would
 take on the wire, in bytes. This is used internally, but might have some
 other applications elsewhere as well. Notice that this size might vary from
