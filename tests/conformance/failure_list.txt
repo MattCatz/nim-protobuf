@@ -1,0 +1,15 @@
+# Known conformance failures for protobuf-nim.
+#
+# Enums are generated as regular (closed) Nim enums, which cannot hold values
+# outside their declared range. Proto3 enums are open: a parser must accept
+# and preserve unknown enum values, including the negative ones. Reading such
+# a value currently fails with a range error, which surfaces as a parse_error
+# in these tests. Fixing this requires changing the generated enum
+# representation (e.g. a distinct int32 with named constants), which would be
+# a breaking API change.
+Required.Proto3.ProtobufInput.RepeatedScalarSelectsLast.ENUM.ProtobufOutput
+Required.Proto3.ProtobufInput.ValidDataRepeated.ENUM.PackedInput.ProtobufOutput
+Required.Proto3.ProtobufInput.ValidDataRepeated.ENUM.UnpackedInput.ProtobufOutput
+Required.Proto3.ProtobufInput.ValidDataScalar.ENUM[3].ProtobufOutput
+Required.Proto3.ProtobufInput.ValidDataScalar.ENUM[4].ProtobufOutput
+Required.Proto3.ProtobufInput.ValidDataScalar.ENUM[5].ProtobufOutput
