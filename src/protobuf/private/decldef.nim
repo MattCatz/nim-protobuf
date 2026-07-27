@@ -4,7 +4,7 @@ type
   ReservedType* = enum
     String, Number, Range
   ProtoType* = enum
-    Field, Enum, EnumVal, ReservedBlock, Reserved, Message, File, Imported, Oneof, Package, ProtoDef
+    Field, Enum, EnumVal, ReservedBlock, Reserved, Message, File, Imported, Oneof, Package, ProtoDef, ProtoOption
   ProtoNode* = ref object
     case kind*: ProtoType
     of Field:
@@ -52,6 +52,9 @@ type
       packages*: seq[ProtoNode]
     of Imported:
       filename*: string
+    of ProtoOption:
+      # Options are parsed but ignored
+      discard
 
 
 proc `$`*(node: ProtoNode): string =
@@ -159,4 +162,6 @@ proc `$`*(node: ProtoNode): string =
         result &= $package
     of Imported:
       result = "Imported file " & node.filename
+    of ProtoOption:
+      result = "Option (ignored)"
 

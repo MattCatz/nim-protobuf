@@ -10,6 +10,5 @@
 Required.Proto3.ProtobufInput.RepeatedScalarSelectsLast.ENUM.ProtobufOutput
 Required.Proto3.ProtobufInput.ValidDataRepeated.ENUM.PackedInput.ProtobufOutput
 Required.Proto3.ProtobufInput.ValidDataRepeated.ENUM.UnpackedInput.ProtobufOutput
-Required.Proto3.ProtobufInput.ValidDataScalar.ENUM[3].ProtobufOutput
 Required.Proto3.ProtobufInput.ValidDataScalar.ENUM[4].ProtobufOutput
 Required.Proto3.ProtobufInput.ValidDataScalar.ENUM[5].ProtobufOutput

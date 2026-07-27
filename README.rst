@@ -89,6 +89,11 @@ also that since the fields don't actually have these names a regular object
 initialiser wouldn't work, therefore you have to use the "init" procs created
 as seen in the above example.
 
+Since every field tracks its presence this way, the proto3 ``optional``
+keyword is accepted and simply behaves like a regular field: a field that
+is explicitly set to its default value is written out, and ``has`` tells
+you whether it was present.
+
 Messages
 ^^^^^^^^
 The types generated are named after the path of the message, but with dots
@@ -251,14 +256,14 @@ Limitations
 -----------
 This library is still in an early phase and has some limitations over the
 official version of protobuf. Noticably it only supports the "proto3"
-syntax, so no optional or required fields. It also doesn't support options,
-meaning you can't set default values for enums and can't control packing
-options. That being said it follows the proto3 specification and will pack
-all scalar fields. It also doesn't support services.
+syntax, so no required fields. Option statements and field options are
+parsed but ignored, meaning you can't set default values for enums and
+can't control packing options. That being said it follows the proto3
+specification and will pack all scalar fields. It also doesn't support
+services.
 
-These limitations apply to the parser as well, so if you are using an
-existing protobuf specification you must remove these fields before being
-able to parse them with this library.
+Anything that isn't parsed must be removed from the specification before
+it can be used with this library.
 
 If you find yourself in need of these features then I'd suggest heading over
 to https://github.com/oswjk/nimpb which uses the official protoc compiler

@@ -14,11 +14,11 @@ The testee (`testee.nim`) speaks the runner's length-prefixed stdio protocol
 using message definitions this library generated from `conformance.proto` —
 so the conformance plumbing itself round-trips through the code under test.
 
-`conformance.proto` and `test_messages_proto3.proto` are trimmed copies of
-the upstream files (protobuf v31.1) with identical field numbers and types;
-each file's header comment lists exactly what was removed and why. JSON,
-text-format, proto2, and editions tests are skipped: the library only
-supports the proto3 binary format.
+`conformance.proto` is a verbatim copy of the upstream file (protobuf
+v31.1). `test_messages_proto3.proto` is a trimmed copy with identical field
+numbers and types; its header comment lists exactly what was removed and
+why. JSON, text-format, proto2, and editions tests are skipped: the library
+only supports the proto3 binary format.
 
 Known failures are tracked in `failure_list.txt` with an explanation. The
 suite fails if a test outside that list fails, or if a listed test starts

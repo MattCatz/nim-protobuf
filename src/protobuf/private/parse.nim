@@ -70,6 +70,11 @@ proc str(): StringParser[string] =
 proc number(): StringParser[string] =
   optwhitespace(charmatch(Digits)).onerror("Number doesn't match!")
 
+proc signedNumber(): StringParser[string] = (optional(ws("-")) + number()).map(
+  proc (input: auto): string =
+    input[0] & input[1]
+)
+
 proc strip(input: string): string =
   input.strip(true, true)
 
@@ -106,18 +111,34 @@ proc package(): StringParser[string] = (token("package") + typespecifier() + end
     stuple[0][1]
 )
 
-proc declaration(): StringParser[ProtoNode] = (optional(ws("repeated")) + typespecifier() + token() + ws("=") + number() + endstatement()).map(
+proc fieldoptions(): StringParser[string] =
+  ## Field options like [packed = true] are accepted but ignored
+  (ws("[") + allbut("]") + ws("]")).map(
+    proc (input: auto): string =
+      input[0][1]
+  )
+
+proc optionstatement(): StringParser[ProtoNode] =
+  ## Option statements are accepted but ignored
+  (token("option") + typespecifier() + ws("=") + (str() / signedNumber() / token()) + endstatement()).map(
+    proc (input: auto): ProtoNode =
+      ProtoNode(kind: ProtoOption)
+  )
+
+proc declaration(): StringParser[ProtoNode] = (optional(ws("repeated") / ws("optional")) + typespecifier() + token() + ws("=") + number() + optional(fieldoptions()) + endstatement()).map(
   proc (input: auto): ProtoNode =
-    result = ProtoNode(kind: Field, number: parseInt(input[0][1]), name: input[0][0][0][1], protoType: input[0][0][0][0][1], repeated: input[0][0][0][0][0] != "")
+    # proto3 `optional` means explicit presence, which every field has in
+    # this library, so the label only needs to be accepted
+    result = ProtoNode(kind: Field, number: parseInt(input[0][0][1]), name: input[0][0][0][0][1], protoType: input[0][0][0][0][0][1], repeated: input[0][0][0][0][0][0] == "repeated")
 )
 
-proc mapdeclaration(): StringParser[ProtoNode] = (token("map") + ws("<") + typespecifier() + ws(",") + typespecifier() + ws(">") + token() + ws("=") + number() + endstatement()).map(
+proc mapdeclaration(): StringParser[ProtoNode] = (token("map") + ws("<") + typespecifier() + ws(",") + typespecifier() + ws(">") + token() + ws("=") + number() + optional(fieldoptions()) + endstatement()).map(
   proc (input: auto): ProtoNode =
     result = ProtoNode(kind: Field,
-      number: parseInt(input[0][1]),
-      name: input[0][0][0][1],
-      protoType: input[0][0][0][0][0][1],
-      keyType: input[0][0][0][0][0][0][0][1],
+      number: parseInt(input[0][0][1]),
+      name: input[0][0][0][0][1],
+      protoType: input[0][0][0][0][0][0][1],
+      keyType: input[0][0][0][0][0][0][0][0][1],
       map: true,
       repeated: false)
 )
@@ -147,14 +168,17 @@ proc reserved(): StringParser[ProtoNode] =
       input[0][1]
   )
 
-proc enumvals(): StringParser[ProtoNode] = (token() + ws("=") + number() + endstatement()).map(
+proc enumvals(): StringParser[ProtoNode] = (token() + ws("=") + signedNumber() + optional(fieldoptions()) + endstatement()).map(
   proc (input: auto): ProtoNode =
-    result = ProtoNode(kind: EnumVal, fieldName: input[0][0][0], num: parseInt(input[0][1]))
+    result = ProtoNode(kind: EnumVal, fieldName: input[0][0][0][0], num: parseInt(input[0][0][1]))
 ).onerror("Unable to parse enumval")
 
-proc enumblock(): StringParser[ProtoNode] = (token("enum") + token() + ws("{") + enumvals().repeat(1) + ws("}")).ignorelast(s(";")).map(
+proc enumblock(): StringParser[ProtoNode] = (token("enum") + token() + ws("{") + (optionstatement() / enumvals()).repeat(1) + ws("}")).ignorelast(s(";")).map(
   proc (input: auto): ProtoNode =
-    result = ProtoNode(kind: Enum, enumName: input[0][0][0][1], values: input[0][1])
+    result = ProtoNode(kind: Enum, enumName: input[0][0][0][1], values: @[])
+    for value in input[0][1]:
+      if value.kind == EnumVal:
+        result.values.add value
 )
 
 proc oneof(): StringParser[ProtoNode] = (token("oneof") + token() + ws("{") + declaration().repeat(1) + ws("}")).map(
@@ -162,7 +186,7 @@ proc oneof(): StringParser[ProtoNode] = (token("oneof") + token() + ws("{") + de
     result = ProtoNode(kind: Oneof, oneofName: input[0][0][0][1], oneof: input[0][1])
 )
 
-proc messageblock(): StringParser[ProtoNode] = (token("message") + token() + ws("{") + (oneof() / mapdeclaration() / declaration() / reserved() / enumblock() / token("message").flatMap(
+proc messageblock(): StringParser[ProtoNode] = (token("message") + token() + ws("{") + (oneof() / mapdeclaration() / optionstatement() / declaration() / reserved() / enumblock() / token("message").flatMap(
   proc(msg: string): StringParser[ProtoNode] =
     # Strange hack to get recursive parsers to work properly
     (proc (rest: string): Maybe[(ProtoNode, string), string] =
@@ -187,7 +211,7 @@ proc messageblock(): StringParser[ProtoNode] = (token("message") + token() + ws(
           continue
   )
 
-proc protofile*(): StringParser[ProtoNode] = (syntaxline() + optional(package()) + (messageblock() / importstatement() / enumblock()).repeat(1)).map(
+proc protofile*(): StringParser[ProtoNode] = (syntaxline() + optional(package()) + (messageblock() / importstatement() / enumblock() / optionstatement()).repeat(1)).map(
   proc (input: auto): ProtoNode =
     result = ProtoNode(kind: ProtoType.File, syntax: input[0][0], imported: @[], package: ProtoNode(kind: Package, packageName: input[0][1], messages: @[], packageEnums: @[]))
     for message in input[1]:
@@ -198,6 +222,8 @@ proc protofile*(): StringParser[ProtoNode] = (syntaxline() + optional(package())
           result.imported.add message
         of Enum:
           result.package.packageEnums.add message
+        of ProtoOption:
+          discard
         else: raise newException(AssertionDefect, "Unsupported node kind: " & $message.kind)
 )
 macro expandToFullDef(protoParsed: var ProtoNode, stringGetter: untyped): untyped =
