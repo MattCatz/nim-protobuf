@@ -403,12 +403,15 @@ proc findIgnoreStyle*(arr: openarray[string], field: string): int =
 
 
 {.experimental.}
-template makeDot(kind, fieldArr: untyped): untyped =
+# NOTE: fieldArr is passed as a single ';'-joined string instead of an array
+# literal. Iterating a quote-interpolated array literal inside these macros
+# crashes the Nim 2.x VM ("index out of bounds, the container is empty").
+template makeDot(kind: untyped, fieldArr: static[string]): untyped =
   macro `.`(obj: kind, field: untyped): untyped =
     let
       fname = $field
       newField = newIdentNode("private_" & fname)
-      idx = fieldArr.findIgnoreStyle(fname)
+      idx = fieldArr.split(';').findIgnoreStyle(fname)
     assert idx != -1, "Couldn't find field \"" & fname & "\" in object"
     result = newTree(nnkStmtList,
       newTree(
@@ -428,7 +431,7 @@ template makeDot(kind, fieldArr: untyped): untyped =
     let
       fname = $field
       newField = newIdentNode("private_" & fname)
-      idx = fieldArr.findIgnoreStyle(fname)
+      idx = fieldArr.split(';').findIgnoreStyle(fname)
       objCache = genSym(nskLet)
     assert idx != -1, "Couldn't find field \"" & fname & "\" in object"
     result = newTree(nnkStmtList,
@@ -468,7 +471,7 @@ template makeDot(kind, fieldArr: untyped): untyped =
     for field in fields:
       let
         fname = $field
-        idx = fieldArr.findIgnoreStyle(fname)
+        idx = fieldArr.split(';').findIgnoreStyle(fname)
       assert idx != -1, "Couldn't find field \"" & fname & "\" in object"
       result = nnkInfix.newTree(
         newIdentNode("and"),
@@ -487,7 +490,7 @@ template makeDot(kind, fieldArr: untyped): untyped =
     let
       fname = $field
       newField = newIdentNode("private_" & fname)
-      idx = fieldArr.find(fname)
+      idx = fieldArr.split(';').find(fname)
       objCache = genSym(nskLet)
     assert idx != -1, "Couldn't find field in object"
     result = nnkStmtList.newTree(
@@ -523,6 +526,7 @@ proc genHelpers(typeName: NimNode, fieldNames: openarray[string]): NimNode {.com
     res = newIdentNode("result")
     fieldsSym = genSym(nskVar)
     fieldsLen = fieldNames.len - 1
+    fieldsJoined = fieldNames.join(";")
   var
     initialiserCases = quote do:
       case normalize($`i`[0]):
@@ -567,7 +571,7 @@ proc genHelpers(typeName: NimNode, fieldNames: openarray[string]): NimNode {.com
           newIdentNode("fields"),
           `fieldsSym`
         )
-      makeDot(`typeName`, `fieldNames`)
+      makeDot(`typeName`, `fieldsJoined`)
   else:
     result = quote do:
       macro `macroName`(): untyped =
