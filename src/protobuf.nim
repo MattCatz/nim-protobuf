@@ -70,9 +70,10 @@
 ## As mentioned earlier protobuf 3 makes all fields optional. This means that
 ## each field can either exist or not exist in a message. In many other protobuf
 ## implementations you notice this by having to use special getter or setter
-## procs for field access. In Nim however we have strong meta-programming powers
-## which can hide much of this complexity for us. As can be seen in the above
-## example it looks just like normal Nim code except from one thing, the call to
+## procs for field access. This library generates such getters and setters for
+## every field, but since Nim resolves ``msg.field`` and ``msg.field = x``
+## through them automatically it looks just like normal Nim code, except from
+## one thing, the call to
 ## ``has``. Whenever a field is set to something it will register its presence
 ## in the object. Then when you access the field Nim will first check if it is
 ## present or not, throwing a runtime ``ValueError`` if it isn't set. If you
@@ -91,6 +92,11 @@
 ## keyword is accepted and simply behaves like a regular field: a field that
 ## is explicitly set to its default value is written out, and ``has`` tells
 ## you whether it was present.
+##
+## One consequence of the generated accessors is that their names live in the
+## module that calls ``parseProto``: a top-level variable in that module can't
+## share a name with a field, and a field can't share a name with a generated
+## procedure such as ``write`` or ``len``.
 ##
 ## Messages
 ## ^^^^^^^^
@@ -427,11 +433,6 @@ proc registerEnums(typeMapping: var Table[string, tuple[kind, write, read: NimNo
   else:
     discard
 
-template getField*(obj: untyped, pos: int, field: untyped, name: string): untyped =
-  let objCache = obj # Do this to avoid side-effects
-  if not objCache.fields.contains(pos): raise newException(ValueError, "Field \"" & name & "\" isn't initialized")
-  objCache.field
-
 proc findIgnoreStyle*(arr: openarray[string], field: string): int =
   for idx, fld in arr:
     if fld[0] == field[0]:
@@ -440,70 +441,10 @@ proc findIgnoreStyle*(arr: openarray[string], field: string): int =
   return -1
 
 
-{.experimental.}
 # NOTE: fieldArr is passed as a single ';'-joined string instead of an array
 # literal. Iterating a quote-interpolated array literal inside these macros
 # crashes the Nim 2.x VM ("index out of bounds, the container is empty").
-template makeDot(kind: untyped, fieldArr: static[string]): untyped =
-  macro `.`(obj: kind, field: untyped): untyped =
-    let
-      fname = $field
-      newField = newIdentNode("private_" & fname)
-      idx = fieldArr.split(';').findIgnoreStyle(fname)
-    assert idx != -1, "Couldn't find field \"" & fname & "\" in object"
-    result = newTree(nnkStmtList,
-      newTree(
-        nnkCall,
-        newTree(
-          nnkDotExpr,
-          obj,
-          newIdentNode("getField")
-        ),
-        newLit(idx),
-        newField,
-        newLit(fname)
-      )
-    )
-
-  macro `.=`(obj: kind, field: untyped, value: untyped): untyped =
-    let
-      fname = $field
-      newField = newIdentNode("private_" & fname)
-      idx = fieldArr.split(';').findIgnoreStyle(fname)
-      objCache = genSym(nskLet)
-    assert idx != -1, "Couldn't find field \"" & fname & "\" in object"
-    result = newTree(nnkStmtList,
-      nnkLetSection.newTree(
-        nnkIdentDefs.newTree(
-          objCache,
-          newEmptyNode(),
-          obj
-        )
-      ),
-      newTree(nnkCommand,
-        newTree(nnkDotExpr,
-          newTree(nnkDotExpr,
-            objCache,
-            newIdentNode("fields")
-          ),
-          newIdentNode("incl")
-        ),
-        newLit(idx)
-      ),
-      newTree(nnkAsgn,
-        newTree(nnkCall,
-          newTree(nnkDotExpr,
-            objCache,
-            newIdentNode("getField")
-          ),
-          newLit(idx),
-          newField,
-          newLit(fname)
-        ),
-        value
-      )
-    )
-
+template makePresenceHelpers(kind: untyped, fieldArr: static[string]): untyped =
   macro has(obj: kind, fields: varargs[untyped]): untyped =
     result = newLit(true)
     for field in fields:
@@ -555,6 +496,48 @@ template makeDot(kind: untyped, fieldArr: static[string]): untyped =
         )
       )
     )
+
+proc genAccessors(typeName: NimNode, fieldName: string, fieldType: NimNode, idx: int): NimNode {.compileTime.} =
+  ## Generates the getter and setter for a field. These are plain procs, so
+  ## field access needs no experimental features and tooling like nimsuggest
+  ## can see the field names. The getter returns a var location so that
+  ## elements of repeated and map fields can be modified in place.
+  let
+    getter = newIdentNode(fieldName)
+    setter = newIdentNode(fieldName & "=")
+    private = newIdentNode("private_" & fieldName)
+    idxLit = newLit(idx)
+    errorMsg = newLit("Field \"" & fieldName & "\" isn't initialized")
+    m = newIdentNode("m")
+    value = newIdentNode("value")
+  result = quote do:
+    proc `getter`(`m`: `typeName`): var `fieldType` =
+      if not `m`.fields.contains(`idxLit`):
+        raise newException(ValueError, `errorMsg`)
+      `m`.`private`
+    proc `setter`(`m`: `typeName`, `value`: `fieldType`) =
+      `m`.fields.incl(`idxLit`)
+      `m`.`private` = `value`
+
+proc genExportHelper(typeName: NimNode, fieldNames: openarray[string]): NimNode {.compileTime.} =
+  ## Generates the export statements exportMessage expands to. The list of
+  ## symbols to export depends on the field names, which are only known
+  ## here, not at the exportMessage call site.
+  let helperName = newIdentNode("exportHelper" & $typeName)
+  var exports = newStmtList()
+  exports.add nnkExportStmt.newTree(typeName)
+  exports.add nnkExportStmt.newTree(newIdentNode("init" & $typeName))
+  exports.add nnkExportStmt.newTree(newIdentNode("read" & $typeName))
+  exports.add nnkExportStmt.newTree(newIdentNode("write"))
+  if fieldNames.len > 0:
+    exports.add nnkExportStmt.newTree(newIdentNode("has"))
+    exports.add nnkExportStmt.newTree(newIdentNode("reset"))
+    for field in fieldNames:
+      exports.add nnkExportStmt.newTree(newIdentNode(field))
+      exports.add nnkExportStmt.newTree(newIdentNode(field & "="))
+  result = quote do:
+    template `helperName`() =
+      `exports`
 
 proc genHelpers(typeName: NimNode, fieldNames: openarray[string]): NimNode {.compileTime.} =
   let
@@ -609,7 +592,7 @@ proc genHelpers(typeName: NimNode, fieldNames: openarray[string]): NimNode {.com
           newIdentNode("fields"),
           `fieldsSym`
         )
-      makeDot(`typeName`, `fieldsJoined`)
+      makePresenceHelpers(`typeName`, `fieldsJoined`)
   else:
     result = quote do:
       macro `macroName`(): untyped =
@@ -750,10 +733,12 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
           newEmptyNode()
         ))
         var fields = newSeq[string](node.fields.len)
+        let typeIdent = newIdentNode(node.messageName.replace(".", "_"))
         for i, field in node.fields:
           if field.kind == Field:
             generateTypes(field, messageBlock)
             fields[i] = field.name.replace(".", "_")
+            typeHelpers.add genAccessors(typeIdent, fields[i], copyNimTree(messageBlock[^1][1]), i)
           else:
             generateTypes(field, parent)
             let
@@ -765,9 +750,12 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
               newEmptyNode()
             ))
             fields[i] = oneofName
-        typeHelpers.add genHelpers(newIdentNode(node.messageName.replace(".", "_")), fields)
+            typeHelpers.add genAccessors(typeIdent, oneofName, newIdentNode(oneofType), i)
+        typeHelpers.add genHelpers(typeIdent, fields)
+        typeHelpers.add genExportHelper(typeIdent, fields)
       else:
         typeHelpers.add genHelpers(newIdentNode(node.messageName.replace(".", "_")), @[])
+        typeHelpers.add genExportHelper(newIdentNode(node.messageName.replace(".", "_")), @[])
 
       currentMessage.add(nnkRefTy.newTree(nnkObjectTy.newTree(newEmptyNode(), newEmptyNode(), messageBlock)))
       parent.add(currentMessage)
@@ -1280,7 +1268,6 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
   proto.generateTypes(typeBlock)
   generateProcs(typeMapping, proto, forwardDeclarations, implementations)
   result = quote do:
-    {.experimental.}
     `typeBlock`
     `typeHelpers`
     `forwardDeclarations`
@@ -1315,16 +1302,10 @@ proc parseImpl(protoParsed: ProtoNode): NimNode {.compileTime.} =
 
 macro exportMessage*(typename: untyped): untyped =
   ## Creates export statements required to use a type. Useful if you want to
-  ## make a module for you protobuf specification.
-  result = newStmtList()
-  result.add nnkExportStmt.newTree typename
-  result.add nnkExportStmt.newTree newIdentNode("init" & $typename)
-  result.add nnkExportStmt.newTree newIdentNode("read" & $typename)
-  result.add nnkExportStmt.newTree newIdentNode("write")
-  result.add nnkExportStmt.newTree newIdentNode("has")
-  result.add nnkExportStmt.newTree newIdentNode(".")
-  result.add nnkExportStmt.newTree newIdentNode(".=")
-  result.add nnkExportStmt.newTree newIdentNode("getField")
+  ## make a module for you protobuf specification. The list of symbols to
+  ## export depends on the message's fields, so this expands to an export
+  ## helper generated along with the message.
+  result = newCall(newIdentNode("exportHelper" & $typename))
 
 macro parseProto*(spec: static[string]): untyped =
   ## Parses the protobuf specification contained in the ``spec`` argument. This

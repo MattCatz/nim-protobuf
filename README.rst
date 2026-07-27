@@ -72,9 +72,10 @@ Optional fields
 As mentioned earlier protobuf 3 makes all fields optional. This means that
 each field can either exist or not exist in a message. In many other protobuf
 implementations you notice this by having to use special getter or setter
-procs for field access. In Nim however we have strong meta-programming powers
-which can hide much of this complexity for us. As can be seen in the above
-example it looks just like normal Nim code except from one thing, the call to
+procs for field access. This library generates such getters and setters for
+every field, but since Nim resolves ``msg.field`` and ``msg.field = x``
+through them automatically it looks just like normal Nim code, except from
+one thing, the call to
 ``has``. Whenever a field is set to something it will register its presence
 in the object. Then when you access the field Nim will first check if it is
 present or not, throwing a runtime ``ValueError`` if it isn't set. If you
@@ -93,6 +94,11 @@ Since every field tracks its presence this way, the proto3 ``optional``
 keyword is accepted and simply behaves like a regular field: a field that
 is explicitly set to its default value is written out, and ``has`` tells
 you whether it was present.
+
+One consequence of the generated accessors is that their names live in the
+module that calls ``parseProto``: a top-level variable in that module can't
+share a name with a field, and a field can't share a name with a generated
+procedure such as ``write`` or ``len``.
 
 Messages
 ^^^^^^^^

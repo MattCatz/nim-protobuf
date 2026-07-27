@@ -22,8 +22,10 @@ parseProto(protoSpec)
 var msg = new Example
 msg.exampleNested = initExample_ExampleNested()
 # Fill message with enough data to make the size span more than a single byte
-let example2 = initExample2(field1 = "This is a test" & "!".repeat(120))
-msg.exampleNested.example2 = example2
+# (the variable can't be called example2, that name is taken by the accessor
+# procs generated for the example2 field)
+let inner = initExample2(field1 = "This is a test" & "!".repeat(120))
+msg.exampleNested.example2 = inner
 
 var strm = newStringStream()
 strm.write(msg)
