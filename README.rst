@@ -202,6 +202,35 @@ Will generate the following message and oneof type:
     our_package_ExampleMessage = ref object
       choice: our_package_ExampleMessage_choice_OneOf
 
+Maps
+^^^^
+Map fields turn into Nim's standard ``Table`` type, keyed and valued with
+the same type mapping used for regular fields. Since the ``tables`` module
+is exported by this module they can be used without any extra imports. So a
+message defined like this:
+
+.. code-block:: protobuf
+
+  syntax = "proto3"; // The only syntax supported
+  package our.package;
+  message ExampleMessage {
+    map<string, int32> counts = 1;
+  }
+
+Would appear to be:
+
+.. code-block:: nim
+
+  type
+    our_package_ExampleMessage = ref object
+      counts: Table[string, int32]
+
+Map fields behave like any other field with regards to ``has``, ``reset``,
+and the ``init`` procedure, and are serialized in the format protoc uses,
+so they are wire-compatible with other protobuf implementations. As per the
+protobuf specification keys can be any integral, bool, or string type, and
+values can be any type but another map.
+
 Exporting message definitions
 -----------------------------
 If you want to re-use the same message definitions in multiple places in
@@ -220,13 +249,10 @@ Limitations
 -----------
 This library is still in an early phase and has some limitations over the
 official version of protobuf. Noticably it only supports the "proto3"
-syntax, so no optional or required fields. It also doesn't currently support
-maps but you can use the official workaround found here:
-https://developers.google.com/protocol-buffers/docs/proto3#maps. This is
-planned to be added in the future. It also doesn't support options, meaning
-you can't set default values for enums and can't control packing options.
-That being said it follows the proto3 specification and will pack all scalar
-fields. It also doesn't support services.
+syntax, so no optional or required fields. It also doesn't support options,
+meaning you can't set default values for enums and can't control packing
+options. That being said it follows the proto3 specification and will pack
+all scalar fields. It also doesn't support services.
 
 These limitations apply to the parser as well, so if you are using an
 existing protobuf specification you must remove these fields before being

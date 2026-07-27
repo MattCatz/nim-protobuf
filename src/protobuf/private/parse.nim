@@ -111,6 +111,17 @@ proc declaration(): StringParser[ProtoNode] = (optional(ws("repeated")) + typesp
     result = ProtoNode(kind: Field, number: parseInt(input[0][1]), name: input[0][0][0][1], protoType: input[0][0][0][0][1], repeated: input[0][0][0][0][0] != "")
 )
 
+proc mapdeclaration(): StringParser[ProtoNode] = (token("map") + ws("<") + typespecifier() + ws(",") + typespecifier() + ws(">") + token() + ws("=") + number() + endstatement()).map(
+  proc (input: auto): ProtoNode =
+    result = ProtoNode(kind: Field,
+      number: parseInt(input[0][1]),
+      name: input[0][0][0][1],
+      protoType: input[0][0][0][0][0][1],
+      keyType: input[0][0][0][0][0][0][0][1],
+      map: true,
+      repeated: false)
+)
+
 proc reserved(): StringParser[ProtoNode] =
   (token("reserved") + (((number() + ws("to") + (number() / ws("max"))).ignorelast(ws(",")).map(
     proc (input: auto): ProtoNode =
@@ -151,7 +162,7 @@ proc oneof(): StringParser[ProtoNode] = (token("oneof") + token() + ws("{") + de
     result = ProtoNode(kind: Oneof, oneofName: input[0][0][0][1], oneof: input[0][1])
 )
 
-proc messageblock(): StringParser[ProtoNode] = (token("message") + token() + ws("{") + (oneof() / declaration() / reserved() / enumblock() / token("message").flatMap(
+proc messageblock(): StringParser[ProtoNode] = (token("message") + token() + ws("{") + (oneof() / mapdeclaration() / declaration() / reserved() / enumblock() / token("message").flatMap(
   proc(msg: string): StringParser[ProtoNode] =
     # Strange hack to get recursive parsers to work properly
     (proc (rest: string): Maybe[(ProtoNode, string), string] =

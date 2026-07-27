@@ -32,6 +32,7 @@ message SearchRequest {
     VIDEO = 6;
   }
   Corpus corpus = 4;
+  map<string, int32> page_views = 11;
   message SubMessage {
     reserved "hello", "world";
     string query = 1;
@@ -78,4 +79,6 @@ message Double {
     string query = 4;
     int32 page_number = 5;
   }
+  map<sint64, Result> results_by_id = 6;
+  map < string , Corpus > corpus_by_name = 7;
 }

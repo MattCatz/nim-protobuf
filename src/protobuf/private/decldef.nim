@@ -12,6 +12,8 @@ type
       protoType*: string
       name*: string
       repeated*: bool
+      map*: bool
+      keyType*: string
     of Oneof:
       oneofName*: string
       oneof*: seq[ProtoNode]
@@ -55,12 +57,19 @@ type
 proc `$`*(node: ProtoNode): string =
   case node.kind:
     of Field:
-      result = "Field $1 of type $2 with index $3".format(
-        node.name,
-        node.protoType,
-        node.number)
-      if node.repeated:
-        result &= " is repeated"
+      if node.map:
+        result = "Map field $1 of type map<$2, $3> with index $4".format(
+          node.name,
+          node.keyType,
+          node.protoType,
+          node.number)
+      else:
+        result = "Field $1 of type $2 with index $3".format(
+          node.name,
+          node.protoType,
+          node.number)
+        if node.repeated:
+          result &= " is repeated"
     of Oneof:
       result = "One-of named $1, with one of these fields:\n".format(
         node.oneofName)

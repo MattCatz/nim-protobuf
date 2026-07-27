@@ -73,7 +73,7 @@
 ## procs for field access. In Nim however we have strong meta-programming powers
 ## which can hide much of this complexity for us. As can be seen in the above
 ## example it looks just like normal Nim code except from one thing, the call to
-## ``has``. Whenever a field is set to something it will register it's presence
+## ``has``. Whenever a field is set to something it will register its presence
 ## in the object. Then when you access the field Nim will first check if it is
 ## present or not, throwing a runtime ``ValueError`` if it isn't set. If you
 ## want to remove a value already set in an object you simply call ``reset``
@@ -120,7 +120,7 @@
 ## procs are simply named ``write`` and are only differentiated by their types.
 ## This write procedure takes two arguments plus an optional third parameter,
 ## the ``Stream`` to write to, an instance of the message type to write, and a
-## boolean telling it to prepend the message with a varint of it's length or
+## boolean telling it to prepend the message with a varint of its length or
 ## not. This boolean is used for internal purposes, but might also come in handy
 ## if you want to stream multiple messages as described in
 ## https://developers.google.com/protocol-buffers/docs/techniques#streaming.
@@ -200,6 +200,35 @@
 ##     our_package_ExampleMessage = ref object
 ##       choice: our_package_ExampleMessage_choice_OneOf
 ##
+## Maps
+## ^^^^
+## Map fields turn into Nim's standard ``Table`` type, keyed and valued with
+## the same type mapping used for regular fields. Since the ``tables`` module
+## is exported by this module they can be used without any extra imports. So a
+## message defined like this:
+##
+## .. code-block:: protobuf
+##
+##   syntax = "proto3"; // The only syntax supported
+##   package our.package;
+##   message ExampleMessage {
+##     map<string, int32> counts = 1;
+##   }
+##
+## Would appear to be:
+##
+## .. code-block:: nim
+##
+##   type
+##     our_package_ExampleMessage = ref object
+##       counts: Table[string, int32]
+##
+## Map fields behave like any other field with regards to ``has``, ``reset``,
+## and the ``init`` procedure, and are serialized in the format protoc uses,
+## so they are wire-compatible with other protobuf implementations. As per the
+## protobuf specification keys can be any integral, bool, or string type, and
+## values can be any type but another map.
+##
 ## Exporting message definitions
 ## -----------------------------
 ## If you want to re-use the same message definitions in multiple places in
@@ -218,13 +247,10 @@
 ## -----------
 ## This library is still in an early phase and has some limitations over the
 ## official version of protobuf. Noticably it only supports the "proto3"
-## syntax, so no optional or required fields. It also doesn't currently support
-## maps but you can use the official workaround found here:
-## https://developers.google.com/protocol-buffers/docs/proto3#maps. This is
-## planned to be added in the future. It also doesn't support options, meaning
-## you can't set default values for enums and can't control packing options.
-## That being said it follows the proto3 specification and will pack all scalar
-## fields. It also doesn't support services.
+## syntax, so no optional or required fields. It also doesn't support options,
+## meaning you can't set default values for enums and can't control packing
+## options. That being said it follows the proto3 specification and will pack
+## all scalar fields. It also doesn't support services.
 ##
 ## These limitations apply to the parser as well, so if you are using an
 ## existing protobuf specification you must remove these fields before being
@@ -265,6 +291,7 @@ export basetypes
 export macros
 export strutils
 export streams
+export tables
 
 type ValidationError = object of Defect
 
@@ -300,6 +327,10 @@ proc verifyAndExpandTypes(node: ProtoNode, validTypes: seq[string], parent: seq[
     of Field:
       block fieldBlock:
         #node.name = parent.join(".") & "." & node.name
+        if node.map:
+          ValidationAssert(node.keyType in ["int32", "int64", "uint32", "uint64", "sint32", "sint64",
+            "fixed32", "fixed64", "sfixed32", "sfixed64", "bool", "string"],
+            "Map key type must be an integral, bool, or string type: " & node.keyType)
         if node.protoType notin ["int32", "int64", "uint32", "uint64", "sint32", "sint64", "fixed32",
           "fixed64", "sfixed32", "sfixed64", "bool", "bytes", "enum", "float", "double", "string"]:
           if node.protoType[0] != '.':
@@ -584,7 +615,17 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
   proc generateTypes(node: ProtoNode, parent: var NimNode) =
     case node.kind:
     of Field:
-      if node.repeated:
+      if node.map:
+        parent.add(nnkIdentDefs.newTree(
+          newIdentNode("private_" & node.name),
+          nnkBracketExpr.newTree(
+            newIdentNode("Table"),
+            if typeMapping.hasKey(node.keyType): typeMapping[node.keyType].kind else: newIdentNode(node.keyType.replace(".", "_")),
+            if typeMapping.hasKey(node.protoType): typeMapping[node.protoType].kind else: newIdentNode(node.protoType.replace(".", "_")),
+          ),
+          newEmptyNode()
+        ))
+      elif node.repeated:
         parent.add(nnkIdentDefs.newTree(
           newIdentNode("private_" & node.name),
           nnkBracketExpr.newTree(
@@ -729,10 +770,29 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
     else:
       echo "Unsupported kind: " & $node.kind
       discard
-  proc generateFieldLen(typeMapping: Table[string, tuple[kind, write, read: NimNode, wire: int]], node: ProtoNode, field: NimNode): NimNode =
+  proc generateFieldLen(typeMapping: Table[string, tuple[kind, write, read: NimNode, wire: int]], node: ProtoNode, field: NimNode, res: NimNode = newIdentNode("result")): NimNode =
     result = newStmtList()
+    if node.map:
+      # Each entry is written as a length-delimited pseudo-message with
+      # key = 1 and value = 2, so size the entries with synthetic fields.
+      let
+        keyField = ProtoNode(kind: Field, number: 1, protoType: node.keyType, name: "key")
+        valueField = ProtoNode(kind: Field, number: 2, protoType: node.protoType, name: "value")
+        keySym = genSym(nskForVar)
+        valueSym = genSym(nskForVar)
+        entrySizeSym = genSym(nskVar)
+        entryDesc = newLit(getVarIntLen(node.number shl 3 or 2))
+        keyLen = generateFieldLen(typeMapping, keyField, keySym, entrySizeSym)
+        valueLen = generateFieldLen(typeMapping, valueField, valueSym, entrySizeSym)
+      result.add(quote do:
+        for `keySym`, `valueSym` in `field`.pairs:
+          var `entrySizeSym` = 0
+          `keyLen`
+          `valueLen`
+          `res` += `entryDesc` + getVarIntLen(`entrySizeSym`.int64) + `entrySizeSym`
+      )
+      return
     let fieldDesc = newLit(getVarIntLen(node.number shl 3 or (if not node.repeated and typeMapping.hasKey(node.protoType): typeMapping[node.protoType].wire else: 2)))
-    let res = newIdentNode("result")
     result.add(quote do:
       `res` += `fieldDesc`
     )
@@ -798,9 +858,51 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
           `res` += `field`.len
         )
 
+  proc generateReadStmt(typeMapping: Table[string, tuple[kind, write, read: NimNode, wire: int]], protoType: string, stream: NimNode): NimNode =
+    let protoRead = if typeMapping.hasKey(protoType):
+        typeMapping[protoType].read
+      else:
+        newIdentNode("read" & protoType.replace(".", "_"))
+    if typeMapping.hasKey(protoType):
+      quote do: `stream`.`protoRead`()
+    else:
+      quote do:
+        when compiles(`stream`.`protoRead`(`stream`.protoReadInt64())):
+          `stream`.`protoRead`(`stream`.protoReadInt64())
+        else:
+          `stream`.`protoRead`()
+
   proc generateFieldRead(typeMapping: Table[string, tuple[kind, write, read: NimNode, wire: int]], node: ProtoNode, stream, field: NimNode, parent: NimNode): NimNode =
     result = newStmtList()
-    if node.repeated:
+    if node.map:
+      let
+        keyType = if typeMapping.hasKey(node.keyType): typeMapping[node.keyType].kind else: newIdentNode(node.keyType.replace(".", "_"))
+        valueType = if typeMapping.hasKey(node.protoType): typeMapping[node.protoType].kind else: newIdentNode(node.protoType.replace(".", "_"))
+        keySym = genSym(nskVar)
+        valueSym = genSym(nskVar)
+        keyRead = generateReadStmt(typeMapping, node.keyType, stream)
+        valueRead = generateReadStmt(typeMapping, node.protoType, stream)
+      result.add(quote do:
+        let endPos = `stream`.getPosition() + `stream`.protoReadInt64()
+        var `keySym`: `keyType`
+        var `valueSym`: `valueType`
+        while `stream`.getPosition() < endPos:
+          case (`stream`.protoReadInt64().uint64 shr 3).int64:
+          of 1:
+            `keySym` = `keyRead`
+          of 2:
+            `valueSym` = `valueRead`
+          else:
+            discard
+        when `valueSym` is ref:
+          # An entry may omit its value; default-initialise it like protoc does
+          if `valueSym`.isNil:
+            `valueSym` = new `valueType`
+        if not `parent`.has(`field`):
+          `parent`.`field` = initTable[`keyType`, `valueType`]()
+        `parent`.`field`[`keySym`] = `valueSym`
+      )
+    elif node.repeated:
       if typeMapping.hasKey(node.protoType) and node.protoType != "string" and node.protoType != "bytes":
         let
           sizeSym = genSym(nskVar)
@@ -823,28 +925,35 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
           `parent`.`field`.add(`readStmt`)
         )
     else:
-      let
-        protoRead = if typeMapping.hasKey(node.protoType):
-          typeMapping[node.protoType].read
-        else:
-          newIdentNode("read" & node.protoType.replace(".", "_"))
-        readStmt = if typeMapping.hasKey(node.protoType):
-          quote do: `stream`.`protoRead`()
-        else:
-          quote do:
-            when compiles(`stream`.`protoRead`(`stream`.protoReadInt64())):
-              `stream`.`protoRead`(`stream`.protoReadInt64())
-            else:
-              `stream`.`protoRead`()
-
-      #result.add(quote do:
-      #  `field` = `readStmt`
-      #)
+      let readStmt = generateReadStmt(typeMapping, node.protoType, stream)
       result.add(nnkAsgn.newTree(nnkDotExpr.newTree(parent, field), readStmt))
 
   proc generateFieldWrite(typeMapping: Table[string, tuple[kind, write, read: NimNode, wire: int]], node: ProtoNode, stream, field: NimNode): NimNode =
     # Write field number and wire type
     result = newStmtList()
+    if node.map:
+      let
+        keyField = ProtoNode(kind: Field, number: 1, protoType: node.keyType, name: "key")
+        valueField = ProtoNode(kind: Field, number: 2, protoType: node.protoType, name: "value")
+        keySym = genSym(nskForVar)
+        valueSym = genSym(nskForVar)
+        entrySizeSym = genSym(nskVar)
+        entryDesc = newLit(node.number shl 3 or 2)
+        keyLen = generateFieldLen(typeMapping, keyField, keySym, entrySizeSym)
+        valueLen = generateFieldLen(typeMapping, valueField, valueSym, entrySizeSym)
+        keyWrite = generateFieldWrite(typeMapping, keyField, stream, keySym)
+        valueWrite = generateFieldWrite(typeMapping, valueField, stream, valueSym)
+      result.add(quote do:
+        for `keySym`, `valueSym` in `field`.pairs:
+          `stream`.protoWriteInt64(`entryDesc`)
+          var `entrySizeSym` = 0
+          `keyLen`
+          `valueLen`
+          `stream`.protoWriteInt64(`entrySizeSym`)
+          `keyWrite`
+          `valueWrite`
+      )
+      return
     let fieldWrite = nnkCall.newTree(
         newIdentNode("protoWriteInt64"),
         stream,
