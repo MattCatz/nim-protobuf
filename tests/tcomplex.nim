@@ -25,7 +25,12 @@ message DoubleNestedMessage {
   NestedMessage body = 1;
 }
 """
-parseProto(testSpec)
+
+protoSpec testSpec:
+  type
+    Message* = Message
+    NestedMessage* = NestedMessage
+    DoubleNestedMessage* = DoubleNestedMessage
 
 var msg1 = new Message
 msg1.name = "Hello"

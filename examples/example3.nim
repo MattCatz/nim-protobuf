@@ -21,7 +21,7 @@ proc echoDataStream(stream: Stream) =
   stream.setPosition(0)
 
 # Define our protobuf specification and generate Nim code to use it
-const protoSpec = """
+const spec = """
 syntax = "proto3";
 
 message ExampleMessage {
@@ -29,7 +29,8 @@ message ExampleMessage {
   int32 count = 2;
 }
 """
-parseProto(protoSpec)
+protoSpec spec:
+  type ExampleMessage* = ExampleMessage
 
 # Create our message
 var msg = new ExampleMessage
@@ -43,7 +44,7 @@ var ss = newStringStream()
 ss.write(msg, writeSize = true)
 ss.echoDataStream
 
-var readMsg = ss.readExampleMessage(maxSize = ss.protoReadInt64())
+var readMsg = ss.read(ExampleMessage, maxSize = ss.protoReadInt64())
 if readMsg.has(number):
   echo "Number: ", readMsg.number
 if readMsg.has(count):

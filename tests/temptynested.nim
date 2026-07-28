@@ -3,7 +3,7 @@ import "../src/protobuf"
 import streams
 import strutils
 
-const protoSpec = """
+const spec = """
 syntax = "proto3";
 
 message Example2 {}
@@ -18,11 +18,18 @@ message Example3{
 }
 
 """
-parseProto(protoSpec)
+
+protoSpec spec:
+  type
+    ExampleNested* = Example.ExampleNested
+    Example2* = Example2
+    Example* = Example
+    Example3* = Example3
+    Child* = Example3.Child
 
 var
-  a = new Example_ExampleNested
+  a = new ExampleNested
   b = new Example2
   c = new Example
   d = new Example3
-  e = new Example3_Child
+  e = new Child

@@ -1,33 +1,34 @@
 protobuf
 ===========
 This is a pure Nim implementation of protobuf, meaning that it doesn't rely
-on the ``protoc`` compiler. The entire implementation is based on a macro
-that takes in either a string or a file containing the proto3 format as
-specified at https://developers.google.com/protocol-buffers/docs/proto3. It
-then produces procedures to read, write, and calculate the length of a
-message, along with types to hold the data in your Nim program. The data
-types are intended to be as close as possible to what you would normally use
-in Nim, making it feel very natural to use these types in your program in
-contrast to some protobuf implementations. Protobuf 3 however has all fields
-as optional fields, this means that the types generated have a little bit of
-special sauce going on behind the scenes. This will be explained in a later
-section. The entire read/write structure is built on top of the Stream
-interface from the ``streams`` module, meaning it can be used directly with
-anything that uses streams.
+on the ``protoc`` compiler. The entire implementation is based on a block
+that takes a file or a string containing the proto3 format as specified at
+https://developers.google.com/protocol-buffers/docs/proto3, along with a list
+of the types you want to use from it. It then produces procedures to read,
+write, and calculate the length of a message, along with types to hold the
+data in your Nim program. The data types are intended to be as close as
+possible to what you would normally use in Nim, making it feel very natural
+to use these types in your program in contrast to some protobuf
+implementations. Protobuf 3 however has all fields as optional fields, this
+means that the types generated have a little bit of special sauce going on
+behind the scenes. This will be explained in a later section. The entire
+read/write structure is built on top of the Stream interface from the
+``streams`` module, meaning it can be used directly with anything that uses
+streams.
 
 Example
 -------
-To whet your appetite the following example shows how this protobuf macro can
+To whet your appetite the following example shows how this protobuf block can
 be used to generate the required code and read and write protobuf messages.
 This example can also be found in the examples folder. Note that it is also
-possible to read in the protobuf specification from a file.
+possible to read the protobuf specification from a file with ``proto``.
 
 .. code-block:: nim
 
   import protobuf, streams
 
   # Define our protobuf specification and generate Nim code to use it
-  const protoSpec = """
+  const spec = """
   syntax = "proto3";
 
   message ExampleMessage {
@@ -39,13 +40,19 @@ possible to read in the protobuf specification from a file.
     }
   }
   """
-  parseProto(protoSpec)
+
+  # Every line names one type from the specification. The names are yours to
+  # pick, the paths on the right are the ones the specification uses.
+  protoSpec spec:
+    type
+      ExampleMessage* = ExampleMessage
+      SubMessage* = ExampleMessage.SubMessage
 
   # Create our message
   var msg = new ExampleMessage
   msg.number = 10
   msg.text = "Hello world"
-  msg.nested = initExampleMessage_SubMessage(aField = 100)
+  msg.nested = SubMessage.init(aField = 100)
 
   # Write it to a stream
   var stream = newStringStream()
@@ -53,11 +60,51 @@ possible to read in the protobuf specification from a file.
 
   # Read the message from the stream and output the data, if it's all present
   stream.setPosition(0)
-  var readMsg = stream.readExampleMessage()
+  var readMsg = stream.read(ExampleMessage)
   if readMsg.has(number, text, nested) and readMsg.nested.has(aField):
     echo readMsg.number
     echo readMsg.text
     echo readMsg.nested.aField
+
+The specification more commonly lives in its own file, in which case ``proto``
+takes the path, resolved relative to the Nim file containing the block:
+
+.. code-block:: nim
+
+  proto "example.proto":
+    type ExampleMessage* = ExampleMessage
+
+Editing the specification recompiles the module that reads it.
+
+Naming and visibility
+---------------------
+The body of the block is a list of ``type Name = some.proto.Path``
+declarations. The path on the right is interpreted against the specification
+and is always the full path: the package, then any enclosing messages, then
+the type. A specification without a ``package`` statement has bare paths. The
+name on the left is what the type is called in your program, and starring it
+exports it exactly as starring any other Nim type does.
+
+You only name what you use. Types you leave out are still generated, so they
+still work as the types of fields — the only thing you can't do with them is
+declare or construct one, because they have no name you can reach:
+
+.. code-block:: nim
+
+  proto "example.proto":
+    type Report* = app.Report      # app.Chart is left unnamed
+
+  let report = stream.read(Report)
+  echo report.chart.title          # fine, reached through the field
+  report.chart.title = "signal"    # also fine
+  let c = Chart.init()             # won't compile, there is no such name
+
+Because starring a line exports procs alongside the type, a block with a
+starred line has to appear at top level, where Nim allows export markers.
+
+An unstarred line names a type only inside the module holding the block, and
+a block with no starred line at all exports nothing, which keeps a module's
+specification entirely to itself.
 
 Generated code
 --------------
@@ -96,57 +143,58 @@ is explicitly set to its default value is written out, and ``has`` tells
 you whether it was present.
 
 One consequence of the generated accessors is that their names live in the
-module that calls ``parseProto``: a top-level variable in that module can't
-share a name with a field, and a field can't share a name with a generated
-procedure such as ``write`` or ``len``.
+module holding the block: a top-level variable in that module can't share a
+name with a field, and a field can't share a name with a generated procedure
+such as ``write`` or ``len``.
 
 Messages
 ^^^^^^^^
-The types generated are named after the path of the message, but with dots
-replaced by underscores. So if the protobuf specification contains a package
-name it starts with that, then the name of the message. If the message is
-nested then the parent message is put between the package and the message.
-As an example we can look at a protobuf message defined like this:
+A message becomes a ``ref object`` under the name your block gives it. So for
+a specification like this:
 
 .. code-block:: protobuf
 
   syntax = "proto3"; // The only syntax supported
-  package = our.package;
+  package our.package;
   message ExampleMessage {
       int32 simpleField = 1;
   }
 
-The type generated for this message would be named
-``our_package_ExampleMessage``. Since Nim is case and underscore insensitive
-you can of course write this with any style you desire, be it camel-case,
-snake-case, or a mix as seen above. For this specific instance the type
-would appear to be:
+a block naming it
+
+.. code-block:: nim
+
+  proto "example.proto":
+    type Example* = our.package.ExampleMessage
+
+produces a type that would appear to be:
 
 .. code-block:: nim
 
   type
-    our_package_ExampleMessage = ref object
+    Example* = ref object
       simpleField: int32
 
 Messages also generate a reader, writer, and length procedure to read,
-write, and get the length of a message on the wire respectively. All write
-procs are simply named ``write`` and are only differentiated by their types.
-This write procedure takes two arguments plus an optional third parameter,
+write, and get the length of a message on the wire respectively. They are
+named ``read``, ``write``, and ``len`` for every message and tell each other
+apart by their types alone, so there are no generated names to remember.
+The write procedure takes two arguments plus an optional third parameter,
 the ``Stream`` to write to, an instance of the message type to write, and a
 boolean telling it to prepend the message with a varint of its length or
 not. This boolean is used for internal purposes, but might also come in handy
 if you want to stream multiple messages as described in
 https://developers.google.com/protocol-buffers/docs/techniques#streaming.
-The read procedure is named similarily to all the ``streams`` module
-readers, simply "read" appended with the name of the type. So for the above
-message the reader would be named ``read_our_package_ExampleMessage``.
-Notice again how you can write it in different styles in Nim if you'd like.
-One could of course also create an alias for this name should it prove too
-verbose. Analagously to the ``write`` procedure the reader also takes an
+The read procedure takes the message type as its second argument, in the
+style of the ``streams`` module's ``read`` for plain types, so reading the
+message above is ``stream.read(Example)``.
+Analagously to the ``write`` procedure the reader also takes an
 optional ``maxSize`` argument of the exact size of the message on the wire.
 If the size is negative, the default, the stream is read until ``atEnd``
 returns true, while a size of 0 is an empty message. If the stream ends
 before ``maxSize`` bytes are read an ``IOError`` is raised.
+``readInto`` reads into a message that already exists instead of returning a
+new one, which is protobuf's merge behaviour.
 The ``len`` procedure is slightly simpler, it only
 takes an instance of the message type and returns the size this message would
 take on the wire, in bytes. This is used internally, but might have some
@@ -155,27 +203,40 @@ one instance of the type to another as varints can have multiple sizes,
 repeated fields different amount of elements, and oneofs having different
 choices to name a few.
 
+Since the fields don't really have the names they appear to have, a regular
+object initialiser wouldn't work. Instead every message type gets an ``init``
+which takes the fields you want to set by name:
+
+.. code-block:: nim
+
+  var msg = Example.init(simpleField = 100'i32)
+
+Naming a field the message doesn't have is a compile error listing the fields
+it does have, and a value of the wrong type is caught the same way it would be
+in an object constructor.
+
 Enums
 ^^^^^
-Enums are named the same way as messages, and are always declared as pure.
-So an enum defined like this:
+Enums are named by the block the same way messages are, and are always
+declared as pure. So an enum defined like this:
 
 .. code-block:: protobuf
 
   syntax = "proto3"; // The only syntax supported
-  package = our.package;
+  package our.package;
   enum Langs {
     UNIVERSAL = 0;
     NIM = 1;
     C = 2;
   }
 
-Would end up with a type like this:
+named by a line ``type Langs* = our.package.Langs`` would end up with a type
+like this:
 
 .. code-block:: nim
 
   type
-    our_package_Langs {.pure.} = enum
+    Langs* {.pure.} = enum
       UNIVERSAL = 0, NIM = 1, C = 2
 
 For internal use enums also generate a reader and writer procedure. These
@@ -186,11 +247,12 @@ useful.
 OneOfs
 ^^^^^^
 In order for oneofs to work with Nims type system they generate their own
-type. This might change in the future. Oneofs are named the same way as
-their parent message, but with the name of the oneof field, and ``_OneOf``
-appended. All oneofs contain a field named ``option`` of a ranged integer
-from 0 to the number of options. This type is used to create an object
-variant for each of the fields in the oneof. So a oneof defined like this:
+type. This might change in the future. The helper type of a oneof is named by
+the path of the oneof field itself, so it can be named and constructed like
+any other type. All oneofs contain a field named ``option`` telling you which
+member is set, of a generated enum of the member names. This is used to create
+an object variant for each of the fields in the oneof. So a oneof defined like
+this:
 
 .. code-block:: protobuf
 
@@ -199,21 +261,57 @@ variant for each of the fields in the oneof. So a oneof defined like this:
   message ExampleMessage {
     oneof choice {
       int32 firstField = 1;
-      string secondField = 1;
+      string secondField = 2;
     }
   }
 
-Will generate the following message and oneof type:
+named by a block like this:
+
+.. code-block:: nim
+
+  protoSpec spec:
+    type
+      Example* = our.package.ExampleMessage
+      Choice* = our.package.ExampleMessage.choice
+
+Will generate the following message and oneof type, along with the enum the
+discriminator uses:
 
 .. code-block:: nim
 
   type
-    our_package_ExampleMessage_choice_OneOf = object
-      case option: range[0 .. 1]
-      of 0: firstField: int32
-      of 1: secondField: string
-    our_package_ExampleMessage = ref object
-      choice: our_package_ExampleMessage_choice_OneOf
+    ChoiceKind* {.pure.} = enum
+      firstField, secondField
+    Choice* = object
+      case option: ChoiceKind
+      of firstField: firstField: int32
+      of secondField: secondField: string
+    Example* = ref object
+      choice: Choice
+
+The enum is named after the name your block gave the oneof, plus ``Kind``, and
+it lists the members in declaration order. Since it's the type of ``option``
+its members can be written unqualified in a ``case``:
+
+.. code-block:: nim
+
+  case msg.choice.option
+  of firstField:  echo msg.choice.firstField
+  of secondField: echo msg.choice.secondField
+
+The enum is pure, so a member whose name is also in scope as something else
+has to be qualified — a member called ``handle`` clashes with
+``system.handle``, and ``of ChoiceKind.handle:`` is then the way to write it.
+
+A oneof holds exactly one member, so its ``init`` takes exactly one, and
+fills in ``option`` for you:
+
+.. code-block:: nim
+
+  msg.choice = Choice.init(secondField = "hello")
+
+Passing no member, more than one, or a name the oneof doesn't have is a
+compile error.
 
 Maps
 ^^^^
@@ -235,7 +333,7 @@ Would appear to be:
 .. code-block:: nim
 
   type
-    our_package_ExampleMessage = ref object
+    Example* = ref object
       counts: Table[string, int32]
 
 Map fields behave like any other field with regards to ``has``, ``reset``,
@@ -244,19 +342,38 @@ so they are wire-compatible with other protobuf implementations. As per the
 protobuf specification keys can be any integral, bool, or string type, and
 values can be any type but another map.
 
-Exporting message definitions
------------------------------
+Sharing message definitions
+---------------------------
 If you want to re-use the same message definitions in multiple places in
-your code it's a good idea to create a module for you definition. This can
-also be useful if you want to rename some of the fields protobuf declares,
-or if you want to hide particular messages or create extra functionality.
-Since protobuf uses a little bit of magic under the hood a special
-`exportMessage` macro exists that will create the export statements you need
-in order to export a message definition from the module that reads the
-protobuf specification, to any module that imports it. Note however that it
-doesn't export sub-messages or any dependent types, so be sure to export
-those manually. Anything that's not a message (such as an enum) should be
-exported by the normal `export` statement.
+your code it's a good idea to create a module for your definition. This can
+also be useful if you want to give protobuf's types names that suit your
+program better, or if you want to hide particular messages or create extra
+functionality. Starring a line in the block is all it takes:
+
+.. code-block:: nim
+
+  # snapstats.nim
+  import protobuf
+
+  proto "snapstats/v1.proto":
+    type
+      Series* = smartrg.almanac.snapstats.v1.Series
+      Encoding* = smartrg.almanac.snapstats.v1.PointEncoding
+      Internal = smartrg.almanac.snapstats.v1.Bookkeeping
+
+.. code-block:: nim
+
+  # consumer.nim
+  import snapstats, streams
+
+  var s = Series.init(name = "receive")
+  stream.write s
+
+``Series`` and ``Encoding`` cross the module boundary with their accessors,
+``init``, ``read``, ``write``, ``len``, ``has``, and ``reset``; ``Internal``
+and every type the block didn't name stay behind. Sub-messages and other
+dependent types need no special handling — a type you didn't name still works
+through the fields of the ones you did.
 
 Limitations
 -----------

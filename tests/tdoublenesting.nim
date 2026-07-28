@@ -3,7 +3,7 @@ import "../src/protobuf"
 import streams
 import strutils
 
-const protoSpec = """
+const spec = """
 syntax = "proto3";
 
 message Example2 {
@@ -17,14 +17,19 @@ message Example {
     ExampleNested exampleNested = 1;
 }
 """
-parseProto(protoSpec)
+
+protoSpec spec:
+  type
+    Example* = Example
+    ExampleNested* = Example.ExampleNested
+    Example2* = Example2
 
 var msg = new Example
-msg.exampleNested = initExample_ExampleNested()
+msg.exampleNested = ExampleNested.init()
 # Fill message with enough data to make the size span more than a single byte
 # (the variable can't be called example2, that name is taken by the accessor
 # procs generated for the example2 field)
-let inner = initExample2(field1 = "This is a test" & "!".repeat(120))
+let inner = Example2.init(field1 = "This is a test" & "!".repeat(120))
 msg.exampleNested.example2 = inner
 
 var strm = newStringStream()

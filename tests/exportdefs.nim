@@ -1,5 +1,5 @@
-# Wrapping module for texport.nim: parses a specification and exports one of
-# its messages, the pattern described in the "Exporting message definitions"
+# Wrapping module for texport.nim: generates a specification and exports one
+# of its messages, the pattern described in the "Sharing message definitions"
 # section of the documentation.
 import "../src/protobuf"
 
@@ -13,6 +13,6 @@ message Person {
   map<string, string> attributes = 4;
 }
 """
-parseProto(spec)
 
-exportMessage Person
+protoSpec spec:
+  type Person* = Person

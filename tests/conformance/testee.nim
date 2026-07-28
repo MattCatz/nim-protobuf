@@ -2,22 +2,22 @@
 # program and sends length-prefixed ConformanceRequest messages on stdin,
 # expecting a length-prefixed ConformanceResponse on stdout for each. Run it
 # through run.sh.
-import streams, os
+import streams
 import "../../src/protobuf"
 
-const confDir = currentSourcePath().parentDir()
-parseProtoFile(confDir / "conformance.proto")
-parseProtoFile(confDir / "test_messages_proto3.proto")
+proto "conformance.proto":
+  type
+    ConformanceRequest* = conformance.ConformanceRequest
+    ConformanceResponse* = conformance.ConformanceResponse
+    ResponseResult* = conformance.ConformanceResponse.result
+    RequestPayload* = conformance.ConformanceRequest.payload
+    FailureSet* = conformance.FailureSet
+    WireFormat* = conformance.WireFormat
+
+proto "test_messages_proto3.proto":
+  type TestAllTypesProto3* = protobuf_test_messages.proto3.TestAllTypesProto3
 
 const testAllTypesProto3 = "protobuf_test_messages.proto3.TestAllTypesProto3"
-
-# Option indices of the ConformanceResponse result oneof, in declaration order
-const
-  optParseError = 0
-  optSerializeError = 1
-  optRuntimeError = 3
-  optProtobufPayload = 4
-  optSkipped = 6
 
 proc toStream(bytes: seq[uint8]): StringStream =
   result = newStringStream()
@@ -30,52 +30,52 @@ proc toBytes(str: string): seq[uint8] =
   for i, c in str:
     result[i] = c.uint8
 
-proc respond(option: range[0..8], text: string): conformance_ConformanceResponse =
-  result = initconformance_ConformanceResponse()
+proc respond(option: ResponseResultKind, text: string): ConformanceResponse =
+  result = ConformanceResponse.init()
   case option:
-  of optParseError:
-    result.result = conformance_ConformanceResponse_result_OneOf(option: optParseError, parse_error: text)
-  of optSerializeError:
-    result.result = conformance_ConformanceResponse_result_OneOf(option: optSerializeError, serialize_error: text)
-  of optRuntimeError:
-    result.result = conformance_ConformanceResponse_result_OneOf(option: optRuntimeError, runtime_error: text)
-  of optSkipped:
-    result.result = conformance_ConformanceResponse_result_OneOf(option: optSkipped, skipped: text)
+  of parse_error:
+    result.result = ResponseResult.init(parse_error = text)
+  of serialize_error:
+    result.result = ResponseResult.init(serialize_error = text)
+  of runtime_error:
+    result.result = ResponseResult.init(runtime_error = text)
+  of skipped:
+    result.result = ResponseResult.init(skipped = text)
   else:
     doAssert false
 
-proc respond(payload: seq[uint8]): conformance_ConformanceResponse =
-  result = initconformance_ConformanceResponse()
-  result.result = conformance_ConformanceResponse_result_OneOf(option: optProtobufPayload, protobuf_payload: payload)
+proc respond(payload: seq[uint8]): ConformanceResponse =
+  result = ConformanceResponse.init()
+  result.result = ResponseResult.init(protobuf_payload = payload)
 
-proc handle(req: conformance_ConformanceRequest): conformance_ConformanceResponse =
+proc handle(req: ConformanceRequest): ConformanceResponse =
   let messageType = if req.has(message_type): req.message_type else: ""
 
   if messageType == "conformance.FailureSet":
     var payload = newStringStream()
-    payload.write initconformance_FailureSet()
+    payload.write FailureSet.init()
     return respond(payload.data.toBytes)
 
-  if not req.has(payload) or req.payload.option != 0:
-    return respond(optSkipped, "only protobuf input is supported")
+  if not req.has(payload) or req.payload.option != RequestPayloadKind.protobuf_payload:
+    return respond(skipped, "only protobuf input is supported")
   if messageType != testAllTypesProto3:
-    return respond(optSkipped, "unsupported message type: " & messageType)
+    return respond(skipped, "unsupported message type: " & messageType)
   let outputFormat = if req.has(requested_output_format): req.requested_output_format
-    else: conformance_WireFormat.UNSPECIFIED
-  if outputFormat != conformance_WireFormat.PROTOBUF:
-    return respond(optSkipped, "only protobuf output is supported")
+    else: WireFormat.UNSPECIFIED
+  if outputFormat != WireFormat.PROTOBUF:
+    return respond(skipped, "only protobuf output is supported")
 
-  var msg: protobuf_test_messages_proto3_TestAllTypesProto3
+  var msg: TestAllTypesProto3
   try:
-    msg = toStream(req.payload.protobuf_payload).readprotobuf_test_messages_proto3_TestAllTypesProto3()
+    msg = toStream(req.payload.protobuf_payload).read(TestAllTypesProto3)
   except Exception as e:
-    return respond(optParseError, e.msg)
+    return respond(parse_error, e.msg)
   try:
     var output = newStringStream()
     output.write msg
     return respond(output.data.toBytes)
   except Exception as e:
-    return respond(optSerializeError, e.msg)
+    return respond(serialize_error, e.msg)
 
 proc main() =
   let input = newFileStream(stdin)
@@ -92,12 +92,12 @@ proc main() =
     if msgLen > 0'u32 and input.readData(addr buf[0], msgLen.int) != msgLen.int:
       stderr.writeLine "testee: truncated request"
       quit 1
-    var resp: conformance_ConformanceResponse
+    var resp: ConformanceResponse
     try:
-      let req = newStringStream(buf).readconformance_ConformanceRequest()
+      let req = newStringStream(buf).read(ConformanceRequest)
       resp = handle(req)
     except Exception as e:
-      resp = respond(optRuntimeError, e.msg)
+      resp = respond(runtime_error, e.msg)
     var respStream = newStringStream()
     respStream.write resp
     var respLen = respStream.data.len.uint32

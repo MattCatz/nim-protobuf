@@ -17,7 +17,9 @@ message WithOptional {
   int32 plain = 3;
 }
 """
-parseProto(testSpec)
+
+protoSpec testSpec:
+  type WithOptional* = WithOptional
 
 # An unset optional field is not serialized
 block:
@@ -35,18 +37,18 @@ block:
   ss.write msg
   assert $ss == "0800", "unexpected bytes: " & $ss
   ss.setPosition(0)
-  let read = ss.readWithOptional()
+  let read = ss.read(WithOptional)
   assert read.has(counter)
   assert read.counter == 0
   assert not read.has(label)
 
 # Round trip and reset
 block:
-  var msg = initWithOptional(counter = 42'i32, label = "hi")
+  var msg = WithOptional.init(counter = 42'i32, label = "hi")
   var ss = newStringStream()
   ss.write msg
   ss.setPosition(0)
-  var read = ss.readWithOptional()
+  var read = ss.read(WithOptional)
   assert read.counter == 42
   assert read.label == "hi"
   read.reset(counter)

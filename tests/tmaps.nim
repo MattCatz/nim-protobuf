@@ -26,7 +26,12 @@ message Maps {
   map<string, Kind> kinds = 4;
 }
 """
-parseProto(testSpec)
+
+protoSpec testSpec:
+  type
+    Inner* = Inner
+    Maps* = Maps
+    Kind* = Maps.Kind
 
 # Single-entry maps have deterministic output, check the exact bytes against
 # what protoc produces. Multi-entry output depends on table iteration order.
@@ -55,7 +60,7 @@ block:
 
 block:
   var msg = new Maps
-  msg.kinds = {"e": Maps_Kind.SPECIAL}.toTable
+  msg.kinds = {"e": Kind.SPECIAL}.toTable
   var ss = newStringStream()
   ss.write msg
   assert $ss == "22050A01651001", "unexpected bytes: " & $ss
@@ -68,7 +73,7 @@ block:
   var ss = newStringStream()
   ss.write msg
   ss.setPosition(0)
-  let read = ss.readMaps()
+  let read = ss.read(Maps)
   assert read.counts == msg.counts
   assert read.names == msg.names
 
@@ -81,7 +86,7 @@ block:
 
 # The init macro and has() treat maps like any other field
 block:
-  var msg = initMaps(counts = {"x": 42'i32}.toTable)
+  var msg = Maps.init(counts = {"x": 42'i32}.toTable)
   assert msg.has(counts)
   assert not msg.has(names)
   assert msg.counts["x"] == 42
@@ -91,7 +96,7 @@ block:
   var ss = newStringStream()
   ss.write "\x0A\x05\x0A\x01\x61\x10\x01\x0A\x05\x0A\x01\x61\x10\x02"
   ss.setPosition(0)
-  let read = ss.readMaps()
+  let read = ss.read(Maps)
   assert read.counts == {"a": 2'i32}.toTable
 
 # Entries with a missing key or value produce the default value
@@ -99,7 +104,7 @@ block:
   var ss = newStringStream()
   ss.write "\x0A\x03\x0A\x01\x61\x0A\x02\x10\x05"
   ss.setPosition(0)
-  let read = ss.readMaps()
+  let read = ss.read(Maps)
   assert read.counts == {"a": 0'i32, "": 5'i32}.toTable
 
 # A missing message value becomes a default instance, not nil
@@ -107,7 +112,7 @@ block:
   var ss = newStringStream()
   ss.write "\x1A\x03\x0A\x01\x6B"
   ss.setPosition(0)
-  let read = ss.readMaps()
+  let read = ss.read(Maps)
   assert not read.inners["k"].isNil
 
 # Unknown fields are skipped, both in messages and inside map entries
@@ -119,7 +124,7 @@ block:
   ss.write "\x61\x01\x02\x03\x04\x05\x06\x07\x08" # field 12, 64-bit
   ss.write "\x0A\x07\x0A\x01\x61\x18\x07\x10\x02" # counts entry with unknown field 3
   ss.setPosition(0)
-  let read = ss.readMaps()
+  let read = ss.read(Maps)
   assert read.counts == {"a": 2'i32}.toTable
 
 echo "All good!"
