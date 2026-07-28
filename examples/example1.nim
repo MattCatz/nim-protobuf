@@ -33,7 +33,7 @@ var stream: StringStream
 echo "Simple:"
 # Create a new string stream, and an instance of our generated type
 stream = newStringStream()
-var simple = new Simple
+var simple = Simple.init()
 # Set the number field of our instance
 simple.number = 150
 # Write our message
@@ -50,7 +50,7 @@ echo "--------------------------------------------------------------------"
 echo "Complex:"
 # Create a new string stream, and an instance of our generated type
 stream = newStringStream()
-var complexObj = new Complex
+var complexObj = Complex.init()
 # Set the data fields of our instance
 complexObj.url = "peterme.net"
 complexObj.title = "Welcome to my DevLog"
@@ -71,14 +71,14 @@ echo "--------------------------------------------------------------------"
 echo "Combined:"
 # Create a new string stream, and an instance of our generated type
 stream = newStringStream()
-var combined = new Combined
+var combined = Combined.init()
 # Set the data fields of our instance
 combined.simples = @[]
 combined.simples.add(Simple.init(number = 100))
 combined.simples.add(Simple.init(number = 200))
 combined.simples.add(Simple.init(number = 500))
 combined.simples.add(Simple.init(number = 9380))
-combined.complex = new Complex
+combined.complex = Complex.init()
 combined.complex.url = "Hello world"
 combined.complex.title = "Another string"
 combined.complex.snippets = @["snippet1", "snippet2", "snippet3"]

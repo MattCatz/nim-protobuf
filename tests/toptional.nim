@@ -23,7 +23,7 @@ protoSpec testSpec:
 
 # An unset optional field is not serialized
 block:
-  var msg = new WithOptional
+  var msg = WithOptional.init()
   var ss = newStringStream()
   ss.write msg
   assert $ss == "", "unexpected bytes: " & $ss
@@ -31,7 +31,7 @@ block:
 
 # An optional field explicitly set to its default value is serialized
 block:
-  var msg = new WithOptional
+  var msg = WithOptional.init()
   msg.counter = 0
   var ss = newStringStream()
   ss.write msg

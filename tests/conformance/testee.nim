@@ -7,15 +7,19 @@ import "../../src/protobuf"
 
 proto "conformance.proto":
   type
-    ConformanceRequest* = conformance.ConformanceRequest
-    ConformanceResponse* = conformance.ConformanceResponse
-    ResponseResult* = conformance.ConformanceResponse.result
-    RequestPayload* = conformance.ConformanceRequest.payload
-    FailureSet* = conformance.FailureSet
-    WireFormat* = conformance.WireFormat
+    ConformanceRequest = conformance.ConformanceRequest
+    ConformanceResponse = conformance.ConformanceResponse
+    ResponseResult = conformance.ConformanceResponse.result
+    RequestPayload = conformance.ConformanceRequest.payload
+    FailureSet = conformance.FailureSet
+    WireFormat = conformance.WireFormat
 
+# TestAllTypesProto3 is corecursive: its NestedMessage has a `corecursive`
+# field back to it, reached both through `optional_nested_message` and through
+# the `oneof_field` oneof. Both cycles run through singular fields, so it can't
+# be a plain object and has to be asked for as ref.
 proto "test_messages_proto3.proto":
-  type TestAllTypesProto3* = protobuf_test_messages.proto3.TestAllTypesProto3
+  type TestAllTypesProto3 = ref protobuf_test_messages.proto3.TestAllTypesProto3
 
 const testAllTypesProto3 = "protobuf_test_messages.proto3.TestAllTypesProto3"
 

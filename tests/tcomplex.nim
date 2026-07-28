@@ -32,17 +32,17 @@ protoSpec testSpec:
     NestedMessage* = NestedMessage
     DoubleNestedMessage* = DoubleNestedMessage
 
-var msg1 = new Message
+var msg1 = Message.init()
 msg1.name = "Hello"
 msg1.value = "World"
-var msg2 = new Message
+var msg2 = Message.init()
 msg2.name = "Foo"
 msg2.value = "Bar"
 
-var nmsg = new NestedMessage
+var nmsg = NestedMessage.init()
 nmsg.content = @[msg1, msg2]
 
-var dnmsg = new DoubleNestedMessage
+var dnmsg = DoubleNestedMessage.init()
 dnmsg.body = nmsg
 
 var ds = newStringStream()

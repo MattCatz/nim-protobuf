@@ -16,7 +16,7 @@ block:
   var ss = newStringStream()
   ss.write r
   ss.setPosition(0)
-  let back = ss.read(Report)
+  var back = ss.read(Report)
   assert back.name == "weekly"
   assert back.kind == Kind.FANCY
   assert back.note.body == "text"
@@ -38,7 +38,7 @@ block:
   var ss = newStringStream()
   ss.write "\x0A\x08\x0A\x06signal"      # field 1 (Chart) with title "signal"
   ss.setPosition(0)
-  let r = ss.read(Report)
+  var r = ss.read(Report)
   assert r.has(chart)
   assert r.chart.title == "signal"
   r.chart.title = "changed"

@@ -24,7 +24,7 @@ protoSpec spec:
     ExampleNested* = Example.ExampleNested
     Example2* = Example2
 
-var msg = new Example
+var msg = Example.init()
 msg.exampleNested = ExampleNested.init()
 # Fill message with enough data to make the size span more than a single byte
 # (the variable can't be called example2, that name is taken by the accessor

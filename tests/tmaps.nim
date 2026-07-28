@@ -36,30 +36,30 @@ protoSpec testSpec:
 # Single-entry maps have deterministic output, check the exact bytes against
 # what protoc produces. Multi-entry output depends on table iteration order.
 block:
-  var msg = new Maps
+  var msg = Maps.init()
   msg.counts = {"a": 1'i32}.toTable
   var ss = newStringStream()
   ss.write msg
   assert $ss == "0A050A01611001", "unexpected bytes: " & $ss
 
 block:
-  var msg = new Maps
+  var msg = Maps.init()
   msg.names = {3'i64: "hi"}.toTable
   var ss = newStringStream()
   ss.write msg
   assert $ss == "1206080312026869", "unexpected bytes: " & $ss
 
 block:
-  var inner = new Inner
+  var inner = Inner.init()
   inner.s = "v"
-  var msg = new Maps
+  var msg = Maps.init()
   msg.inners = {"k": inner}.toTable
   var ss = newStringStream()
   ss.write msg
   assert $ss == "1A080A016B12030A0176", "unexpected bytes: " & $ss
 
 block:
-  var msg = new Maps
+  var msg = Maps.init()
   msg.kinds = {"e": Kind.SPECIAL}.toTable
   var ss = newStringStream()
   ss.write msg
@@ -67,7 +67,7 @@ block:
 
 # Multi-entry round trip
 block:
-  var msg = new Maps
+  var msg = Maps.init()
   msg.counts = {"a": 1'i32, "bc": -2'i32, "": 300'i32}.toTable
   msg.names = {0'i64: "", -1'i64: "x"}.toTable
   var ss = newStringStream()
@@ -79,7 +79,7 @@ block:
 
 # An unset map writes nothing
 block:
-  var msg = new Maps
+  var msg = Maps.init()
   var ss = newStringStream()
   ss.write msg
   assert $ss == "", "unexpected bytes: " & $ss
@@ -107,13 +107,16 @@ block:
   let read = ss.read(Maps)
   assert read.counts == {"a": 0'i32, "": 5'i32}.toTable
 
-# A missing message value becomes a default instance, not nil
+# A missing message value becomes the empty message, which for a plain object
+# is what the entry already holds
 block:
   var ss = newStringStream()
   ss.write "\x1A\x03\x0A\x01\x6B"
   ss.setPosition(0)
   let read = ss.read(Maps)
-  assert not read.inners["k"].isNil
+  assert read.inners.hasKey("k")
+  assert not read.inners["k"].has(s)
+  assert read.inners["k"] == Inner.init()
 
 # Unknown fields are skipped, both in messages and inside map entries
 block:

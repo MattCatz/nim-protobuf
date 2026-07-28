@@ -47,7 +47,7 @@
 ##       SubMessage* = ExampleMessage.SubMessage
 ##
 ##   # Create our message
-##   var msg = new ExampleMessage
+##   var msg = ExampleMessage.init()
 ##   msg.number = 10
 ##   msg.text = "Hello world"
 ##   msg.nested = SubMessage.init(aField = 100)
@@ -81,7 +81,9 @@
 ## and is always the full path: the package, then any enclosing messages, then
 ## the type. A specification without a ``package`` statement has bare paths. The
 ## name on the left is what the type is called in your program, and starring it
-## exports it exactly as starring any other Nim type does.
+## exports it exactly as starring any other Nim type does. Writing ``ref`` in
+## front of the path asks for that message to be a reference, which is covered
+## under `Messages`_.
 ##
 ## You only name what you use. Types you leave out are still generated, so they
 ## still work as the types of fields — the only thing you can't do with them is
@@ -92,7 +94,7 @@
 ##   proto "example.proto":
 ##     type Report* = app.Report      # app.Chart is left unnamed
 ##
-##   let report = stream.read(Report)
+##   var report = stream.read(Report)
 ##   echo report.chart.title          # fine, reached through the field
 ##   report.chart.title = "signal"    # also fine
 ##   let c = Chart.init()             # won't compile, there is no such name
@@ -147,7 +149,7 @@
 ##
 ## Messages
 ## ^^^^^^^^
-## A message becomes a ``ref object`` under the name your block gives it. So for
+## A message becomes an ``object`` under the name your block gives it. So for
 ## a specification like this:
 ##
 ## .. code-block:: protobuf
@@ -170,8 +172,86 @@
 ## .. code-block:: nim
 ##
 ##   type
-##     Example* = ref object
+##     Example* = object
 ##       simpleField: int32
+##
+## Being a plain object means a message behaves like any other Nim value.
+## Assigning one copies it, so the two go their separate ways:
+##
+## .. code-block:: nim
+##
+##   var a = Example.init(simpleField = 1)
+##   var b = a
+##   b.simpleField = 2
+##   assert a.simpleField == 1    # a is untouched
+##
+## Comparing two messages compares their contents, so ``==`` is what you would
+## want it to be and a message can be a ``Table`` key. A message can be a
+## ``const``, evaluated while compiling and baked into your program. There is no
+## nil: the default value of a message type is the empty message, which is
+## exactly what proto3 says an unset message field means. And a ``let`` message
+## is genuinely immutable — mutating a field needs a message you can mutate:
+##
+## .. code-block:: nim
+##
+##   let frozen = stream.read(Example)
+##   echo frozen.simpleField      # reading is fine
+##   frozen.simpleField = 2       # won't compile, frozen isn't mutable
+##
+## The same applies to a message reached through a field of another message, and
+## to a message you want to pass somewhere that mutates it, such as
+## ``readInto``. If you need to mutate it, bind it with ``var``.
+##
+## Recursive messages and ``ref``
+## ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+## An object can't contain itself, so a message that reaches itself through a
+## plain field has no representation as a plain object. Nim rejects it while
+## compiling the generated types:
+##
+## .. code-block:: protobuf
+##
+##   message Node {
+##     int32 value = 1;
+##     Node next = 2;      // Node inside Node
+##   }
+##
+## ::
+##
+##   Error: illegal recursion in type 'proto_Node'
+##
+## Writing ``ref`` in front of the path in the block makes that message a
+## reference, which gives the indirection the cycle needs:
+##
+## .. code-block:: nim
+##
+##   proto "tree.proto":
+##     type Node* = ref our.package.Node
+##
+## Only a message can be asked for as ``ref``; an enum or a oneof is an error at
+## that line. Nothing else about the message changes — the same fields, the same
+## procedures, the same bytes on the wire — but it goes back to behaving the way
+## a reference does: assigning one shares it rather than copying it, ``==``
+## compares identity, and a ``let`` freezes only the reference, so its fields
+## stay mutable.
+##
+## ``repeated`` and map fields don't need any of this. They are held in a ``seq``
+## and a ``Table``, which are indirections already, so a message that reaches
+## itself only through them stays a plain object:
+##
+## .. code-block:: protobuf
+##
+##   message Tree {
+##     string label = 1;
+##     repeated Tree children = 2;   // fine as a plain object
+##   }
+##
+## A cycle can run through several messages, and through a oneof member, since a
+## oneof is held inside the message that declares it. Marking any one message on
+## the cycle is enough, because the others then hold it by reference. The
+## conformance suite's own ``TestAllTypesProto3`` is a real example: its
+## ``NestedMessage`` has a field back to it, reached both through a plain field
+## and through a oneof, so it is named ``type TestAllTypesProto3* = ref
+## protobuf_test_messages.proto3.TestAllTypesProto3``.
 ##
 ## Messages also generate a reader, writer, and length procedure to read,
 ## write, and get the length of a message on the wire respectively. They are
@@ -192,7 +272,8 @@
 ## returns true, while a size of 0 is an empty message. If the stream ends
 ## before ``maxSize`` bytes are read an ``IOError`` is raised.
 ## ``readInto`` reads into a message that already exists instead of returning a
-## new one, which is protobuf's merge behaviour.
+## new one, which is protobuf's merge behaviour. It mutates the message it is
+## given, so unless the message is a ``ref`` it has to be one you can mutate.
 ## The ``len`` procedure is slightly simpler, it only
 ## takes an instance of the message type and returns the size this message would
 ## take on the wire, in bytes. This is used internally, but might have some
@@ -284,7 +365,7 @@
 ##       case option: ChoiceKind
 ##       of firstField: firstField: int32
 ##       of secondField: secondField: string
-##     Example* = ref object
+##     Example* = object
 ##       choice: Choice
 ##
 ## The enum is named after the name your block gave the oneof, plus ``Kind``, and
@@ -331,7 +412,7 @@
 ## .. code-block:: nim
 ##
 ##   type
-##     Example* = ref object
+##     Example* = object
 ##       counts: Table[string, int32]
 ##
 ## Map fields behave like any other field with regards to ``has``, ``reset``,
@@ -431,6 +512,10 @@ template ValidationAssert(statement: bool, error: string) =
     raise newException(ValidationError, error)
 
 type
+  TypeNameKind = enum
+    ## What a path in a specification names. Only messages can be asked for
+    ## as ``ref``, so the kind has to survive name collection.
+    tnkMessage, tnkEnum, tnkOneof
   ProtoNames = object
     ## Maps the fully qualified dotted name of every type in a specification
     ## to the Nim name it is generated under. Types named by a line in the
@@ -439,6 +524,8 @@ type
     nim: Table[string, string]
     exported: HashSet[string]
     oneofs: HashSet[string]
+    messages: HashSet[string]
+    refTypes: HashSet[string]
     anyExported: bool
 
 proc hiddenName(dotted: string, oneof = false): string =
@@ -448,7 +535,7 @@ proc hiddenName(dotted: string, oneof = false): string =
   ## for every type it defines.
   "proto_" & dotted.replace(".", "_") & (if oneof: "_OneOf" else: "")
 
-proc collectTypeNames(node: ProtoNode, acc: var seq[tuple[path: string, oneof: bool]]) =
+proc collectTypeNames(node: ProtoNode, acc: var seq[tuple[path: string, kind: TypeNameKind]]) =
   ## Gathers the addressable types of an expanded specification: messages,
   ## enums, and the helper type of every oneof field.
   case node.kind:
@@ -461,28 +548,32 @@ proc collectTypeNames(node: ProtoNode, acc: var seq[tuple[path: string, oneof: b
     for enu in node.packageEnums:
       collectTypeNames(enu, acc)
   of Message:
-    acc.add (path: node.messageName, oneof: false)
+    acc.add (path: node.messageName, kind: tnkMessage)
     for enu in node.definedEnums:
       collectTypeNames(enu, acc)
     for field in node.fields:
       if field.kind == Oneof:
-        acc.add (path: field.oneofName, oneof: true)
+        acc.add (path: field.oneofName, kind: tnkOneof)
     for nested in node.nested:
       collectTypeNames(nested, acc)
   of Enum:
-    acc.add (path: node.enumName, oneof: false)
+    acc.add (path: node.enumName, kind: tnkEnum)
   else: discard
 
 proc initProtoNames(proto: ProtoNode): ProtoNames =
-  var found: seq[tuple[path: string, oneof: bool]] = @[]
+  var found: seq[tuple[path: string, kind: TypeNameKind]] = @[]
   collectTypeNames(proto, found)
   result.nim = initTable[string, string]()
   result.exported = initHashSet[string]()
   result.oneofs = initHashSet[string]()
+  result.messages = initHashSet[string]()
+  result.refTypes = initHashSet[string]()
   for entry in found:
-    result.nim[entry.path] = hiddenName(entry.path, entry.oneof)
-    if entry.oneof:
-      result.oneofs.incl entry.path
+    result.nim[entry.path] = hiddenName(entry.path, entry.kind == tnkOneof)
+    case entry.kind
+    of tnkOneof: result.oneofs.incl entry.path
+    of tnkMessage: result.messages.incl entry.path
+    of tnkEnum: discard
 
 proc nimName(names: ProtoNames, dotted: string): string =
   if names.nim.hasKey(dotted): names.nim[dotted] else: hiddenName(dotted)
@@ -499,6 +590,12 @@ proc optionName(names: ProtoNames, oneofDotted: string): string =
 
 proc typeIdent(names: ProtoNames, dotted: string): NimNode =
   newIdentNode(names.nimName(dotted))
+
+proc isRef(names: ProtoNames, dotted: string): bool =
+  ## Whether a line in the block asked for this message as ``ref``. Every other
+  ## message is generated as a plain object, so it is copied on assignment and
+  ## has to be mutated through a ``var``.
+  dotted in names.refTypes
 
 proc optionIdent(names: ProtoNames, oneofDotted: string): NimNode =
   newIdentNode(names.optionName(oneofDotted))
@@ -665,11 +762,18 @@ proc findIgnoreStyle*(arr: openarray[string], field: string): int =
   return -1
 
 
-proc genAccessors(names: ProtoNames, typeName: NimNode, fieldName: string, fieldType: NimNode, idx: int): NimNode {.compileTime.} =
+proc genAccessors(names: ProtoNames, typeName: NimNode, fieldName: string, fieldType: NimNode, idx: int, isRef: bool): NimNode {.compileTime.} =
   ## Generates the getter and setter for a field. These are plain procs, so
   ## field access needs no experimental features and tooling like nimsuggest
-  ## can see the field names. The getter returns a var location so that
-  ## elements of repeated and map fields can be modified in place.
+  ## can see the field names.
+  ##
+  ## A ref message needs one getter: the message is a reference, so a field of
+  ## it is a mutable location whether or not the message itself is. A plain
+  ## object needs a pair — a ``lent`` getter that reads a message anywhere, and
+  ## a ``var`` getter over a ``var`` message that yields a mutable location, so
+  ## that a nested field can be assigned through the chain and an element of a
+  ## repeated or map field can be modified in place. Mutating a message that
+  ## isn't mutable is then a compile error rather than a change to a copy.
   let
     getter = names.maybeExport(fieldName)
     setter = names.maybeExportAccQuoted(fieldName & "=")
@@ -678,14 +782,28 @@ proc genAccessors(names: ProtoNames, typeName: NimNode, fieldName: string, field
     errorMsg = newLit("Field \"" & fieldName & "\" isn't initialized")
     m = newIdentNode("m")
     value = newIdentNode("value")
-  result = quote do:
-    proc `getter`(`m`: `typeName`): var `fieldType` =
-      if not `m`.fields.contains(`idxLit`):
-        raise newException(ValueError, `errorMsg`)
-      `m`.`private`
-    proc `setter`(`m`: `typeName`, `value`: `fieldType`) =
-      `m`.fields.incl(`idxLit`)
-      `m`.`private` = `value`
+  if isRef:
+    result = quote do:
+      proc `getter`(`m`: `typeName`): var `fieldType` =
+        if not `m`.fields.contains(`idxLit`):
+          raise newException(ValueError, `errorMsg`)
+        `m`.`private`
+      proc `setter`(`m`: `typeName`, `value`: `fieldType`) =
+        `m`.fields.incl(`idxLit`)
+        `m`.`private` = `value`
+  else:
+    result = quote do:
+      proc `getter`(`m`: `typeName`): lent `fieldType` =
+        if not `m`.fields.contains(`idxLit`):
+          raise newException(ValueError, `errorMsg`)
+        `m`.`private`
+      proc `getter`(`m`: var `typeName`): var `fieldType` =
+        if not `m`.fields.contains(`idxLit`):
+          raise newException(ValueError, `errorMsg`)
+        `m`.`private`
+      proc `setter`(`m`: var `typeName`, `value`: `fieldType`) =
+        `m`.fields.incl(`idxLit`)
+        `m`.`private` = `value`
 
 proc genOneofHelpers(names: ProtoNames, typeName, optionType: NimNode, memberNames: openarray[string]): NimNode {.compileTime.} =
   ## Generates the ``init`` of a oneof type, which takes the one member to set
@@ -721,7 +839,7 @@ proc genOneofHelpers(names: ProtoNames, typeName, optionType: NimNode, memberNam
         )
       )
 
-proc genHelpers(names: ProtoNames, typeName: NimNode, fieldNames: openarray[string]): NimNode {.compileTime.} =
+proc genHelpers(names: ProtoNames, typeName: NimNode, fieldNames: openarray[string], isRef: bool): NimNode {.compileTime.} =
   ## Generates the ``init`` macro and, for messages with fields, the ``has``
   ## and ``reset`` macros. All three dispatch on the message type rather than
   ## carrying it in their name, so they are reached through whatever name the
@@ -810,37 +928,95 @@ proc genHelpers(names: ProtoNames, typeName: NimNode, fieldNames: openarray[stri
             `res`
           )
 
-      macro `resetName`(obj: `typeName`, field: untyped): untyped =
-        let
-          fname = $field
-          newField = newIdentNode("private_" & fname)
-          idx = `fieldsJoined`.split(';').find(fname)
-          objCache = genSym(nskLet)
-        assert idx != -1, "Couldn't find field in object"
-        `res` = nnkStmtList.newTree(
-          nnkLetSection.newTree(
-            nnkIdentDefs.newTree(
-              objCache,
+    result.add(
+      if isRef:
+        # A ref message is mutable through its fields wherever it is bound, so
+        # the message is evaluated once into a let and cleared through that
+        quote do:
+          macro `resetName`(obj: `typeName`, field: untyped): untyped =
+            let
+              fname = $field
+              newField = newIdentNode("private_" & fname)
+              idx = `fieldsJoined`.split(';').find(fname)
+              objCache = genSym(nskLet)
+            assert idx != -1, "Couldn't find field in object"
+            `res` = nnkStmtList.newTree(
+              nnkLetSection.newTree(
+                nnkIdentDefs.newTree(
+                  objCache,
+                  newEmptyNode(),
+                  obj
+                )
+              ),
+              nnkCall.newTree(
+                newIdentNode("excl"),
+                nnkDotExpr.newTree(
+                  objCache,
+                  newIdentNode("fields")
+                ),
+                newLit(idx)
+              ),
+              nnkCall.newTree(
+                newIdentNode("reset"),
+                nnkDotExpr.newTree(
+                  objCache,
+                  newField
+                )
+              )
+            )
+      else:
+        # A plain object has to be cleared in place. Holding it in a let would
+        # clear a copy, so the two statements run in a proc taking the message
+        # as var: the message is still evaluated exactly once, and resetting a
+        # field of a message that isn't mutable is a compile error.
+        quote do:
+          macro `resetName`(obj: `typeName`, field: untyped): untyped =
+            let
+              fname = $field
+              newField = newIdentNode("private_" & fname)
+              idx = `fieldsJoined`.split(';').find(fname)
+              resetProc = genSym(nskProc, "protoReset")
+              resetParam = genSym(nskParam, "o")
+            assert idx != -1, "Couldn't find field in object"
+            `res` = nnkBlockStmt.newTree(
               newEmptyNode(),
-              obj
+              nnkStmtList.newTree(
+                nnkProcDef.newTree(
+                  resetProc,
+                  newEmptyNode(),
+                  newEmptyNode(),
+                  nnkFormalParams.newTree(
+                    newEmptyNode(),
+                    nnkIdentDefs.newTree(
+                      resetParam,
+                      nnkVarTy.newTree(bindSym(`typeStr`)),
+                      newEmptyNode()
+                    )
+                  ),
+                  newEmptyNode(),
+                  newEmptyNode(),
+                  nnkStmtList.newTree(
+                    nnkCall.newTree(
+                      newIdentNode("excl"),
+                      nnkDotExpr.newTree(
+                        resetParam,
+                        newIdentNode("fields")
+                      ),
+                      newLit(idx)
+                    ),
+                    nnkCall.newTree(
+                      newIdentNode("reset"),
+                      nnkDotExpr.newTree(
+                        resetParam,
+                        newField
+                      )
+                    )
+                  )
+                ),
+                nnkCall.newTree(resetProc, obj)
+              )
             )
-          ),
-          nnkCall.newTree(
-            newIdentNode("excl"),
-            nnkDotExpr.newTree(
-              objCache,
-              newIdentNode("fields")
-            ),
-            newLit(idx)
-          ),
-          nnkCall.newTree(
-            newIdentNode("reset"),
-            nnkDotExpr.newTree(
-              objCache,
-              newField
-            )
-          )
-        )
+    )
   else:
     result = quote do:
       macro `initName`(T: typedesc[`typeName`], x: varargs[untyped]): untyped =
@@ -998,12 +1174,14 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
           newEmptyNode()
         ))
         var fields = newSeq[string](node.fields.len)
-        let typeIdent = names.typeIdent(node.messageName)
+        let
+          typeIdent = names.typeIdent(node.messageName)
+          messageIsRef = names.isRef(node.messageName)
         for i, field in node.fields:
           if field.kind == Field:
             generateTypes(field, messageBlock)
             fields[i] = field.name.replace(".", "_")
-            typeHelpers.add genAccessors(names, typeIdent, fields[i], copyNimTree(messageBlock[^1][1]), i)
+            typeHelpers.add genAccessors(names, typeIdent, fields[i], copyNimTree(messageBlock[^1][1]), i, messageIsRef)
           else:
             generateTypes(field, parent)
             let
@@ -1015,12 +1193,18 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
               newEmptyNode()
             ))
             fields[i] = oneofName
-            typeHelpers.add genAccessors(names, typeIdent, oneofName, oneofType, i)
-        typeHelpers.add genHelpers(names, typeIdent, fields)
+            typeHelpers.add genAccessors(names, typeIdent, oneofName, oneofType, i, messageIsRef)
+        typeHelpers.add genHelpers(names, typeIdent, fields, messageIsRef)
       else:
-        typeHelpers.add genHelpers(names, names.typeIdent(node.messageName), @[])
+        typeHelpers.add genHelpers(names, names.typeIdent(node.messageName), @[],
+          names.isRef(node.messageName))
 
-      currentMessage.add(nnkRefTy.newTree(nnkObjectTy.newTree(newEmptyNode(), newEmptyNode(), messageBlock)))
+      # A message is a plain object unless a line in the block asked for ref,
+      # which is what breaks a cycle of singular fields
+      let messageObject = nnkObjectTy.newTree(newEmptyNode(), newEmptyNode(), messageBlock)
+      currentMessage.add(
+        if names.isRef(node.messageName): nnkRefTy.newTree(messageObject)
+        else: messageObject)
       parent.add(currentMessage)
       for definedEnum in node.definedEnums:
         generateTypes(definedEnum, parent)
@@ -1154,16 +1338,31 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
         valueSym = genSym(nskVar)
         keyRead = generateReadStmt(typeMapping, node.keyType, stream)
         valueRead = generateReadStmt(typeMapping, node.protoType, stream)
+        valueIsRefMessage = not typeMapping.hasKey(node.protoType) and
+          names.isRef(node.protoType)
         # A message value that appears again within an entry is merged
         valueMerge = if typeMapping.hasKey(node.protoType):
             quote do:
               `valueSym` = `valueRead`
-          else:
+          elif valueIsRefMessage:
             quote do:
               if `valueSym`.isNil:
                 `valueSym` = `valueRead`
               else:
                 `stream`.readInto(`valueSym`, `stream`.protoReadInt64())
+          else:
+            # A plain object starts out as the empty message, so the first
+            # occurrence merges into it exactly as a later one does
+            quote do:
+              `stream`.readInto(`valueSym`, `stream`.protoReadInt64())
+        valueDefault = if valueIsRefMessage:
+            # An entry may omit its value; default-initialise it like protoc
+            # does. A plain object needs nothing, it is already that default.
+            quote do:
+              if `valueSym`.isNil:
+                `valueSym` = new `valueType`
+          else:
+            newStmtList()
       result.add(quote do:
         if (`fieldSpec` and 0b111'u64) != 2'u64:
           raise newException(ValueError, "Wrong wire type for map field")
@@ -1185,10 +1384,7 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
             `valueMerge`
           else:
             `stream`.protoSkipField(entrySpec)
-        when `valueSym` is ref:
-          # An entry may omit its value; default-initialise it like protoc does
-          if `valueSym`.isNil:
-            `valueSym` = new `valueType`
+        `valueDefault`
         if not `parent`.has(`field`):
           `parent`.`field` = initTable[`keyType`, `valueType`]()
         `parent`.`field`[`keySym`] = `valueSym`
@@ -1353,6 +1549,7 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
           writeName = names.maybeExport("write")
           lenName = names.maybeExport("len")
           messageType = names.typeIdent(node.messageName)
+          messageIsRef = names.isRef(node.messageName)
           res = newIdentNode("result")
           s = newIdentNode("s")
           o = newIdentNode("o")
@@ -1388,6 +1585,17 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
               `s`.protoWriteInt64(`o`.len)
           proc `lenName`(`o`: `messageType`): int
         procImpls[3][6] = newStmtList()
+        if not messageIsRef:
+          # readInto merges into a message that already exists, which for a
+          # plain object means mutating the caller's message in place. The
+          # message parameter is the second one of both the declaration and the
+          # implementation, so only its type node changes.
+          procDecls[0][3][2][1] = nnkVarTy.newTree(messageType)
+          procImpls[0][3][2][1] = nnkVarTy.newTree(messageType)
+          # A plain object is already the empty message, so read has nothing to
+          # allocate before merging the stream into it
+          procImpls[1][6] = quote do:
+            `s`.readInto(`res`, `maxSize`)
         for field in node.fields:
           generateProcs(typeMapping, field, procDecls, procImpls)
         # Unknown fields are captured on read and emitted again on write
@@ -1551,10 +1759,11 @@ proc protoPath(node: NimNode): string {.compileTime.} =
       node.repr, node)
     ""
 
-proc parseProtoBlock(body: NimNode): seq[tuple[name: string, exported: bool, path: string, src: NimNode]] {.compileTime.} =
-  ## Reads the ``type Name[*] = some.proto.Path`` lines of a proto block.
+proc parseProtoBlock(body: NimNode): seq[tuple[name: string, exported: bool, isRef: bool, path: string, src: NimNode]] {.compileTime.} =
+  ## Reads the ``type Name[*] = [ref] some.proto.Path`` lines of a proto block.
   ## Any number of one-line declarations and multi-definition type sections
-  ## may be mixed.
+  ## may be mixed. A ``ref`` in front of the path asks for that message to be
+  ## generated as a ``ref object`` instead of a plain object.
   result = @[]
   for stmt in (if body.kind == nnkStmtList: body else: newStmtList(body)):
     case stmt.kind:
@@ -1573,8 +1782,14 @@ proc parseProtoBlock(body: NimNode): seq[tuple[name: string, exported: bool, pat
         if nameNode.kind == nnkPostfix:
           exported = true
           nameNode = nameNode[1]
-        result.add (name: $nameNode, exported: exported,
-          path: protoPath(def[2]), src: def)
+        var
+          pathNode = def[2]
+          isRef = false
+        if pathNode.kind == nnkRefTy:
+          isRef = true
+          pathNode = pathNode[0]
+        result.add (name: $nameNode, exported: exported, isRef: isRef,
+          path: protoPath(pathNode), src: def)
     else:
       error("Only type declarations belong in a proto block, got " &
         $stmt.kind, stmt)
@@ -1618,6 +1833,15 @@ proc applyProtoBlock(names: var ProtoNames, body: NimNode) {.compileTime.} =
     if line.exported:
       names.exported.incl line.path
       names.anyExported = true
+    if line.isRef:
+      # ref is a representation choice for a message. An enum has no fields to
+      # embed and a oneof lives inside the message that declares it, so neither
+      # has anything to indirect
+      if line.path notin names.messages:
+        error("Only a message can be ref, and " & line.path & " is " &
+          (if line.path in names.oneofs: "a oneof" else: "an enum") &
+          ". Drop the ref.", line.src)
+      names.refTypes.incl line.path
   # The discriminator enum of a named oneof takes a derived name, which must not
   # land on a name the block already declared
   for oneof in names.oneofs:
@@ -1664,6 +1888,10 @@ macro protoSpec*(spec: static[string], body: untyped): untyped =
   ## the generated types; a starred line exports it. Types the body doesn't
   ## name are still generated, under a name that can't be reached, and stay
   ## usable through the fields of the types that are named.
+  ##
+  ## A message is generated as a plain object. Writing ``type Name = ref
+  ## some.proto.Path`` generates it as a ``ref object`` instead, which is what a
+  ## message that reaches itself through a plain field needs.
   ##
   ## Use ``proto`` instead when the specification lives in a file.
   parseImpl(parseToDefinition(spec), body)

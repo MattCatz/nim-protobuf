@@ -28,8 +28,8 @@ protoSpec spec:
     Child* = Example3.Child
 
 var
-  a = new ExampleNested
-  b = new Example2
-  c = new Example
-  d = new Example3
-  e = new Child
+  a = ExampleNested.init()
+  b = Example2.init()
+  c = Example.init()
+  d = Example3.init()
+  e = Child.init()

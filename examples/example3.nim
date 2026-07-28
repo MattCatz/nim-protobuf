@@ -33,7 +33,7 @@ protoSpec spec:
   type ExampleMessage* = ExampleMessage
 
 # Create our message
-var msg = new ExampleMessage
+var msg = ExampleMessage.init()
 msg.number = 10
 msg.count = 100
 

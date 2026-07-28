@@ -19,7 +19,7 @@ protoSpec spec:
     SubMessage* = ExampleMessage.SubMessage
 
 # Create our message
-var msg = new ExampleMessage
+var msg = ExampleMessage.init()
 msg.number = 10
 msg.text = "Hello world"
 msg.nested = SubMessage.init(aField = 100)

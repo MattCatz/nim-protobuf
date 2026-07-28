@@ -49,7 +49,7 @@ possible to read the protobuf specification from a file with ``proto``.
       SubMessage* = ExampleMessage.SubMessage
 
   # Create our message
-  var msg = new ExampleMessage
+  var msg = ExampleMessage.init()
   msg.number = 10
   msg.text = "Hello world"
   msg.nested = SubMessage.init(aField = 100)
@@ -83,7 +83,9 @@ declarations. The path on the right is interpreted against the specification
 and is always the full path: the package, then any enclosing messages, then
 the type. A specification without a ``package`` statement has bare paths. The
 name on the left is what the type is called in your program, and starring it
-exports it exactly as starring any other Nim type does.
+exports it exactly as starring any other Nim type does. Writing ``ref`` in
+front of the path asks for that message to be a reference, which is covered
+under `Messages`_.
 
 You only name what you use. Types you leave out are still generated, so they
 still work as the types of fields — the only thing you can't do with them is
@@ -94,7 +96,7 @@ declare or construct one, because they have no name you can reach:
   proto "example.proto":
     type Report* = app.Report      # app.Chart is left unnamed
 
-  let report = stream.read(Report)
+  var report = stream.read(Report)
   echo report.chart.title          # fine, reached through the field
   report.chart.title = "signal"    # also fine
   let c = Chart.init()             # won't compile, there is no such name
@@ -149,7 +151,7 @@ such as ``write`` or ``len``.
 
 Messages
 ^^^^^^^^
-A message becomes a ``ref object`` under the name your block gives it. So for
+A message becomes an ``object`` under the name your block gives it. So for
 a specification like this:
 
 .. code-block:: protobuf
@@ -172,8 +174,86 @@ produces a type that would appear to be:
 .. code-block:: nim
 
   type
-    Example* = ref object
+    Example* = object
       simpleField: int32
+
+Being a plain object means a message behaves like any other Nim value.
+Assigning one copies it, so the two go their separate ways:
+
+.. code-block:: nim
+
+  var a = Example.init(simpleField = 1)
+  var b = a
+  b.simpleField = 2
+  assert a.simpleField == 1    # a is untouched
+
+Comparing two messages compares their contents, so ``==`` is what you would
+want it to be and a message can be a ``Table`` key. A message can be a
+``const``, evaluated while compiling and baked into your program. There is no
+nil: the default value of a message type is the empty message, which is
+exactly what proto3 says an unset message field means. And a ``let`` message
+is genuinely immutable — mutating a field needs a message you can mutate:
+
+.. code-block:: nim
+
+  let frozen = stream.read(Example)
+  echo frozen.simpleField      # reading is fine
+  frozen.simpleField = 2       # won't compile, frozen isn't mutable
+
+The same applies to a message reached through a field of another message, and
+to a message you want to pass somewhere that mutates it, such as
+``readInto``. If you need to mutate it, bind it with ``var``.
+
+Recursive messages and ``ref``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+An object can't contain itself, so a message that reaches itself through a
+plain field has no representation as a plain object. Nim rejects it while
+compiling the generated types:
+
+.. code-block:: protobuf
+
+  message Node {
+    int32 value = 1;
+    Node next = 2;      // Node inside Node
+  }
+
+::
+
+  Error: illegal recursion in type 'proto_Node'
+
+Writing ``ref`` in front of the path in the block makes that message a
+reference, which gives the indirection the cycle needs:
+
+.. code-block:: nim
+
+  proto "tree.proto":
+    type Node* = ref our.package.Node
+
+Only a message can be asked for as ``ref``; an enum or a oneof is an error at
+that line. Nothing else about the message changes — the same fields, the same
+procedures, the same bytes on the wire — but it goes back to behaving the way
+a reference does: assigning one shares it rather than copying it, ``==``
+compares identity, and a ``let`` freezes only the reference, so its fields
+stay mutable.
+
+``repeated`` and map fields don't need any of this. They are held in a ``seq``
+and a ``Table``, which are indirections already, so a message that reaches
+itself only through them stays a plain object:
+
+.. code-block:: protobuf
+
+  message Tree {
+    string label = 1;
+    repeated Tree children = 2;   // fine as a plain object
+  }
+
+A cycle can run through several messages, and through a oneof member, since a
+oneof is held inside the message that declares it. Marking any one message on
+the cycle is enough, because the others then hold it by reference. The
+conformance suite's own ``TestAllTypesProto3`` is a real example: its
+``NestedMessage`` has a field back to it, reached both through a plain field
+and through a oneof, so it is named ``type TestAllTypesProto3* = ref
+protobuf_test_messages.proto3.TestAllTypesProto3``.
 
 Messages also generate a reader, writer, and length procedure to read,
 write, and get the length of a message on the wire respectively. They are
@@ -194,7 +274,8 @@ If the size is negative, the default, the stream is read until ``atEnd``
 returns true, while a size of 0 is an empty message. If the stream ends
 before ``maxSize`` bytes are read an ``IOError`` is raised.
 ``readInto`` reads into a message that already exists instead of returning a
-new one, which is protobuf's merge behaviour.
+new one, which is protobuf's merge behaviour. It mutates the message it is
+given, so unless the message is a ``ref`` it has to be one you can mutate.
 The ``len`` procedure is slightly simpler, it only
 takes an instance of the message type and returns the size this message would
 take on the wire, in bytes. This is used internally, but might have some
@@ -286,7 +367,7 @@ discriminator uses:
       case option: ChoiceKind
       of firstField: firstField: int32
       of secondField: secondField: string
-    Example* = ref object
+    Example* = object
       choice: Choice
 
 The enum is named after the name your block gave the oneof, plus ``Kind``, and
@@ -333,7 +414,7 @@ Would appear to be:
 .. code-block:: nim
 
   type
-    Example* = ref object
+    Example* = object
       counts: Table[string, int32]
 
 Map fields behave like any other field with regards to ``has``, ``reset``,
