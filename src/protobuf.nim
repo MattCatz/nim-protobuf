@@ -1299,17 +1299,21 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
         echo "Unable to create code"
         #raise newException(AssertionError, "Unable to generate code, wire type '" & $typeMapping[field.protoType].wire & "' not supported")
     else:
+      # A message's length is a walk of the whole message, so it is taken once
+      # and used twice. Asking twice doubles the work at every level, which
+      # makes sizing a nested message exponential in its depth.
+      let lenSym = genSym(nskLet, "protoLen")
       if node.repeated:
         result.add(quote do:
           for i in `field`:
-            `res` += i.len
-            `res` += getVarIntLen(i.len.int64)
+            let `lenSym` = i.len
+            `res` += `lenSym` + getVarIntLen(`lenSym`.int64)
           `res` += `fieldDesc`*(`field`.len-1)
         )
       else:
         result.add(quote do:
-          `res` += getVarIntLen(`field`.len.int64)
-          `res` += `field`.len
+          let `lenSym` = `field`.len
+          `res` += getVarIntLen(`lenSym`.int64) + `lenSym`
         )
 
   proc generateReadStmt(typeMapping: Table[string, tuple[kind, write, read: NimNode, wire: int]], protoType: string, stream: NimNode): NimNode =
@@ -1467,13 +1471,24 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
           `valueWrite`
       )
       return
-    let fieldWrite = nnkCall.newTree(
+    let
+      tagLit = newLit(node.number shl 3 or (if not node.repeated and typeMapping.hasKey(node.protoType): typeMapping[node.protoType].wire else: 2))
+      fieldWrite = nnkCall.newTree(
         newIdentNode("protoWriteInt64"),
         stream,
-        newLit(node.number shl 3 or (if not node.repeated and typeMapping.hasKey(node.protoType): typeMapping[node.protoType].wire else: 2))
+        tagLit
       )
+    # A field's tag and its value are known at the same moment, so they go out
+    # in one stream write: every writer, including the generated one for an
+    # enum, has an overload taking the tag in front of the value.
+    proc taggedWrite(value: NimNode): NimNode =
+      nnkCall.newTree(typeMapping[node.protoType].write, stream, tagLit, value)
     # If the field is repeated or has a repeated wire type, write it's length
     if typeMapping.hasKey(node.protoType) and node.protoType != "string" and node.protoType != "bytes":
+      if not node.repeated:
+        # A singular scalar is a tag and a value, nothing in between
+        result.add(taggedWrite(field))
+        return
       result.add(fieldWrite)
       if node.repeated:
         case typeMapping[node.protoType].wire:
@@ -1524,11 +1539,9 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
       let
         iVar = nskForVar.genSym()
         varInt = if node.repeated: nnkBracketExpr.newTree(field, iVar) else: field
-        protoWrite = if typeMapping.hasKey(node.protoType): typeMapping[node.protoType].write else: newEmptyNode()
         innerBody = if typeMapping.hasKey(node.protoType):
-          quote do:
-            `fieldWrite`
-            `stream`.`protoWrite`(`varInt`)
+          # string and bytes: the tag and the length prefix share one write
+          taggedWrite(varInt)
         else:
           # Messages are always written with their length prefixed
           quote do:
@@ -1712,15 +1725,21 @@ proc generateCode(typeMapping: Table[string, tuple[kind, write, read: NimNode, w
           s = newIdentNode("s")
           o = newIdentNode("o")
           e = newIdentNode("e")
+        let tag = newIdentNode("tag")
         decls.add quote do:
           proc `readName`(`s`: Stream): `enumType`
           proc write(`s`: Stream, `o`: `enumType`)
+          proc write(`s`: Stream, `tag`: int64, `o`: `enumType`)
           proc getVarIntLen(`e`: `enumType`): int
         impls.add quote do:
           proc `readName`(`s`: Stream): `enumType` =
               `s`.protoReadInt64().`enumType`
           proc write(`s`: Stream, `o`: `enumType`) =
             `s`.protoWriteInt64(`o`.int64)
+          # The tagged form, so a singular enum field is one write like every
+          # other scalar and the code generator needs no special case for it
+          proc write(`s`: Stream, `tag`: int64, `o`: `enumType`) =
+            `s`.protoWriteInt64(`tag`, `o`.int64)
           proc getVarIntLen(`e`: `enumType`): int =
             getVarIntLen(`e`.int64)
       of ProtoDef:
@@ -1907,3 +1926,25 @@ macro proto*(path: static[string], body: untyped): untyped =
   ##   proto "snapstats/v1.proto":
   ##     type Series* = smartrg.almanac.snapstats.v1.Series
   newCall(bindSym"protoSpec", newCall(bindSym"staticRead", newLit(path)), body)
+
+proc encode*[T](o: T): string =
+  ## Serializes a message to its wire bytes in a single allocation. ``len``
+  ## already knows the exact size, so the buffer is sized once and never grown
+  ## while writing — writing through a stream that grows as it goes pays a
+  ## length check and a possible resize per write.
+  ##
+  ## .. code-block:: nim
+  ##
+  ##   let bytes = encode(series)
+  ##
+  ## This makes ``len`` load-bearing for the output's length, not just for the
+  ## length prefixes of nested messages, so the two are checked against each
+  ## other on every call.
+  mixin write, len
+  # Uninitialised, not zeroed: every byte of the buffer is about to be written,
+  # which is what the check below proves.
+  let s = newStringStream(newStringUninit(o.len))
+  s.write(o)
+  doAssert s.getPosition() == s.data.len,
+    "len and write disagree: wrote " & $s.getPosition() & " of " & $s.data.len & " bytes"
+  result = move(s.data)

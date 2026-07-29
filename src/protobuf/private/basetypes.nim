@@ -20,16 +20,26 @@ when cpuEndian == littleEndian:
       result += 1
       bits = bits shr 7
 
-  proc protoWriteInt64*(s: Stream, x: int64) =
-    ## Writes the number ``x`` to a stream using the protobuf VarInt encoding
-    var
-      bytes = x.hob shr 7
-      num = x
-    s.write((num and 0x7f or (if bytes != 0: 0x80 else: 0)).uint8)
-    while bytes != 0:
+  template varIntInto(buf, i, value: untyped) =
+    ## Encodes ``value`` into ``buf`` at ``i``, advancing ``i``. A VarInt is at
+    ## most 10 bytes, and a tag at most 5.
+    var num = value
+    while num >= 0x80'u64:
+      buf[i] = (num and 0x7f or 0x80).uint8
+      inc i
       num = num shr 7
-      bytes = bytes shr 7
-      s.write((num and 0x7f or (if bytes != 0: 0x80 else: 0)).uint8)
+    buf[i] = num.uint8
+    inc i
+
+  proc protoWriteInt64*(s: Stream, x: int64) =
+    ## Writes the number ``x`` to a stream using the protobuf VarInt encoding.
+    ## The bytes are built in a stack buffer and handed over in one write: a
+    ## byte at a time is an indirect call and a one-byte copy each.
+    var
+      buf: array[10, uint8]
+      i = 0
+    varIntInto(buf, i, cast[uint64](x))
+    s.writeData(addr buf[0], i)
 
   proc protoReadInt64*(s: Stream): int64 =
     ## Reads a number from the stream using the protobuf VarInt encoding
@@ -164,9 +174,10 @@ when cpuEndian == littleEndian:
     ## Writes a string according to the protobuf specification. First the
     ## length of the string is written with VarInt encoding, then the string
     ## follow.
+    ## The payload goes out in one write: a character at a time is one indirect
+    ## call, one length check, and one one-byte copy per character.
     s.protoWriteInt64(x.len)
-    for c in x:
-      s.write(c)
+    s.write(x)
 
   proc protoReadString*(s: Stream): string =
     ## Reads a string according to the protobuf specification. See
@@ -182,9 +193,12 @@ when cpuEndian == littleEndian:
     ## Writes a string according to the protobuf specification. First the
     ## length of the byte sequence is written with VarInt encoding, then the
     ## bytes follow.
+    ## Written in one go like ``protoWriteString``. There is no stream overload
+    ## taking a seq, so the write goes through the sequence's buffer, which is
+    ## contiguous and outlives the call.
     s.protoWriteInt64(x.len)
-    for c in x:
-      s.write(c)
+    if x.len > 0:
+      s.writeData(unsafeAddr x[0], x.len)
 
   proc protoReadBytes*(s: Stream): seq[uint8] =
     ## Reads a byte sequence according to the protobuf specification. See
@@ -195,6 +209,93 @@ when cpuEndian == littleEndian:
     result = newSeq[uint8](length.int)
     if length > 0 and s.readData(addr result[0], length.int) != length.int:
       raise newException(IOError, "Stream ended before end of bytes")
+
+  # A field is a tag followed by its value, and the code generator knows both at
+  # the same moment, so they go out in one write. Each of these is the same
+  # writer as above with the tag in front, so the generated code just passes an
+  # extra argument: which encoding a proto type gets is carried by the name, not
+  # by the Nim type — sint64 and int64 are both int64 here, and so are fixed64
+  # and uint64.
+  proc taggedFixed[T](s: Stream, tag: int64, x: T) =
+    ## Writes a tag and a fixed-width value in one write. The value keeps the
+    ## byte order ``write`` gave it, which on this branch is little endian.
+    var
+      buf: array[16, uint8]
+      i = 0
+    varIntInto(buf, i, cast[uint64](tag))
+    copyMem(addr buf[i], unsafeAddr x, sizeof(x))
+    i += sizeof(x)
+    s.writeData(addr buf[0], i)
+
+  proc protoWriteInt64*(s: Stream, tag: int64, x: int64) =
+    ## Writes a field's tag and its VarInt value in a single write. A tag is at
+    ## most 5 bytes and a VarInt at most 10.
+    var
+      buf: array[16, uint8]
+      i = 0
+    varIntInto(buf, i, cast[uint64](tag))
+    varIntInto(buf, i, cast[uint64](x))
+    s.writeData(addr buf[0], i)
+
+  proc protoWriteInt32*(s: Stream, tag: int64, x: int32) =
+    s.protoWriteInt64(tag, x.int64)
+
+  proc protoWriteUint64*(s: Stream, tag: int64, x: uint64) =
+    s.protoWriteInt64(tag, cast[int64](x))
+
+  proc protoWriteUint32*(s: Stream, tag: int64, x: uint32) =
+    s.protoWriteInt64(tag, x.int64)
+
+  proc protoWriteBool*(s: Stream, tag: int64, x: bool) =
+    s.protoWriteInt64(tag, x.int64)
+
+  proc protoWriteSint64*(s: Stream, tag: int64, x: int64) =
+    s.protoWriteInt64(tag,
+      cast[int64]((cast[uint64](x) shl 1) xor cast[uint64](x shr 63)))
+
+  proc protoWriteSint32*(s: Stream, tag: int64, x: int32) =
+    s.protoWriteSint64(tag, x.int64)
+
+  proc protoWriteFixed64*(s: Stream, tag: int64, x: uint64) =
+    s.taggedFixed(tag, x)
+
+  proc protoWriteFixed32*(s: Stream, tag: int64, x: uint32) =
+    s.taggedFixed(tag, x)
+
+  proc protoWriteSfixed64*(s: Stream, tag: int64, x: int64) =
+    s.taggedFixed(tag, x)
+
+  proc protoWriteSfixed32*(s: Stream, tag: int64, x: int32) =
+    s.taggedFixed(tag, x)
+
+  proc protoWriteFloat*(s: Stream, tag: int64, x: float32) =
+    s.taggedFixed(tag, x)
+
+  proc protoWriteDouble*(s: Stream, tag: int64, x: float64) =
+    s.taggedFixed(tag, x)
+
+  proc protoWriteString*(s: Stream, tag: int64, x: string) =
+    ## The tag and the length prefix share one write, the payload takes the
+    ## second — two writes per string field instead of one per byte.
+    var
+      buf: array[16, uint8]
+      i = 0
+    varIntInto(buf, i, cast[uint64](tag))
+    varIntInto(buf, i, cast[uint64](x.len))
+    s.writeData(addr buf[0], i)
+    if x.len > 0:
+      s.writeData(cstring(x), x.len)
+
+  proc protoWriteBytes*(s: Stream, tag: int64, x: seq[uint8]) =
+    ## Like ``protoWriteString``, for a byte sequence.
+    var
+      buf: array[16, uint8]
+      i = 0
+    varIntInto(buf, i, cast[uint64](tag))
+    varIntInto(buf, i, cast[uint64](x.len))
+    s.writeData(addr buf[0], i)
+    if x.len > 0:
+      s.writeData(unsafeAddr x[0], x.len)
 
   proc protoSkipField*(s: Stream, fieldSpec: uint64) =
     ## Skips over an unknown field, consuming its bytes based on the wire type
